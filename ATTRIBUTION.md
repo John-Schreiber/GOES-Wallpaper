@@ -2,18 +2,20 @@
 
 ## Origin
 
-This project began as a local clone of
-[pjlhjr/GOES-Wallpaper](https://github.com/pjlhjr/GOES-Wallpaper) by Paul H
-(`pjlhjr@gmail.com`), licensed under the Apache License, Version 2.0. The codebase has
-since been substantially rewritten — modern Python, parametric config, retries,
-freshness-aware scheduling, screen-exact cropping, multi-source combos, per-monitor
-wallpapers, georeferenced overlays, a cross-platform backend abstraction, and more.
-See [NEXT_STEPS.md](NEXT_STEPS.md) for the detailed history.
+This project exists because Paul H (`pjlhjr@gmail.com`) built
+[pjlhjr/GOES-Wallpaper](https://github.com/pjlhjr/GOES-Wallpaper) and generously
+shared it under the Apache License, Version 2.0. It's the foundation everything here
+is built on — the idea of turning NOAA's public satellite feed into a live desktop
+wallpaper was his, not ours. Since then the codebase has grown a lot — modern Python,
+parametric config, retries, freshness-aware scheduling, screen-exact cropping,
+multi-source combos, per-monitor wallpapers, georeferenced overlays, a cross-platform
+backend abstraction, and more (see [CHANGELOG.md](CHANGELOG.md) for the details) — but
+none of it would exist without his original work to start from. Thank you, Paul.
 
 This project (the code as it exists now) is licensed under the GNU General Public
-License v3.0-or-later — see [LICENSE](LICENSE). In accordance with the original
-Apache License 2.0's terms, its notice is preserved below for the portions of the
-project's heritage it covers.
+License v3.0-or-later — see [LICENSE](LICENSE). Gratefully, and in keeping with the
+original Apache License 2.0's terms, its notice is preserved below for the portions of
+the project's heritage it covers.
 
 <details>
 <summary>Original Apache License 2.0 notice (pjlhjr/GOES-Wallpaper)</summary>
@@ -36,26 +38,26 @@ limitations under the License.
 
 The original repository's `LICENSE` file (commit `d256923`, 2020-06-10) left the
 `[yyyy] [name of copyright owner]` placeholder from the Apache-2.0 template
-unfilled — reproduced here as committed.
+unfilled — reproduced here exactly as committed.
 
 </details>
 
 ## Techniques
 
-- **Georeferenced overlay approach** (`overlay_graticule`/`overlay_cities` in
-  `goes_wallpaper.py`) was informed by
-  [lanceberc/GOES](https://github.com/lanceberc/GOES), specifically its technique of
-  georeferencing NOAA's rendered GEOS-projection imagery from documented sector
-  offset/resolution constants without needing raw satellite files. No code was copied
-  — this project's implementation uses `pyproj` independently and was calibrated and
-  validated from scratch against real ABI L1b data and known city landmarks (see
-  `NEXT_STEPS.md` and `CUSTOM_IMAGERY_PLAN.md` for details). `lanceberc/GOES` has no
-  LICENSE file in its repository as of this writing, so this credit is for the idea,
-  not a code-reuse license grant.
+- **Georeferenced overlays** (`overlay_graticule`/`overlay_cities` in
+  `goes_wallpaper.py`) owe a real debt to
+  [lanceberc/GOES](https://github.com/lanceberc/GOES) — its write-up of georeferencing
+  NOAA's rendered GEOS-projection imagery from documented sector offset/resolution
+  constants, without needing raw satellite files, was exactly the idea this feature
+  needed and saved a lot of trial and error. This project's implementation was written
+  independently on top of `pyproj` and calibrated/validated from scratch against real
+  ABI L1b data and known city landmarks (see `CUSTOM_IMAGERY_PLAN.md` for details), but
+  the technique itself came from seeing it done there first. Thanks for publishing it.
 
 ## Data source
 
-- Satellite imagery: [NOAA STAR](https://www.star.nesdis.noaa.gov/)'s public CDN
-  (`cdn.star.nesdis.noaa.gov`) and the public `noaa-goes18`/`noaa-goes19` AWS S3
-  buckets. U.S. government satellite data of this kind is generally public domain;
-  this credit is offered as courtesy, not because it's a license requirement.
+- Satellite imagery comes from [NOAA STAR](https://www.star.nesdis.noaa.gov/)'s public
+  CDN (`cdn.star.nesdis.noaa.gov`) and the public `noaa-goes18`/`noaa-goes19` AWS S3
+  buckets — freely available thanks to NOAA's open-data policy. Thanks to NOAA/NESDIS
+  for keeping taxpayer-funded satellite data free and open, and no thanks to anyone
+  who'd rather see it behind a paywall.
