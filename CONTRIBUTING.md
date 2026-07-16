@@ -7,8 +7,11 @@ uv sync
 uv run pytest
 ```
 
-No network access or real hardware required for the test suite — see
-[RELEASE_PLAN.md](RELEASE_PLAN.md) for what it covers and its known gaps.
+No network access or real hardware required — platform-specific logic is exercised
+through a `FakePlatform` stub rather than real APIs. Not yet covered: `run_once`/
+`run_loop` end-to-end (would need mocking `requests.Session` too), and
+`platform_windows.py` itself, which is thin enough that manual verification against
+real hardware has been the coverage so far.
 
 ## Adding a platform backend (Linux/macOS)
 
@@ -62,8 +65,8 @@ specific one prioritized over another:
 
 ## Everything else
 
-There's no formal process beyond "open a PR." `NEXT_STEPS.md` has a running list of
-known gaps and follow-ups if you're looking for something concrete to pick up, and
-`RELEASE_PLAN.md`/`CUSTOM_IMAGERY_PLAN.md` cover the larger not-yet-started
-initiatives (a frozen standalone executable, a from-scratch satellite-imagery
-compositor) if you want something bigger.
+There's no formal process beyond "open a PR" — `main` is protected and requires one.
+`NEXT_STEPS.md` has a running list of known gaps and follow-ups if you're looking for
+something concrete to pick up, and `CUSTOM_IMAGERY_PLAN.md` covers a larger
+not-yet-started initiative (a from-scratch satellite-imagery compositor) if you want
+something bigger.

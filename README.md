@@ -63,6 +63,21 @@ one lives beside the script) — pass `--config` explicitly (see
 [config.example.toml](config.example.toml) for a minimal starting point), or
 everything falls back to the built-in defaults.
 
+#### Installing a pre-built release
+
+Skip the build step entirely by grabbing the wheel from the
+[latest GitHub release](https://github.com/John-Schreiber/GOES-Wallpaper/releases/latest)
+instead of cloning the repo:
+
+```powershell
+uv tool install https://github.com/John-Schreiber/GOES-Wallpaper/releases/download/v2.0.0/goes_wallpaper-2.0.0-py3-none-any.whl
+goes-wallpaper --config path\to\config.toml
+```
+
+(Or download the `.whl` manually and point `uv tool install`/`pip install` at the local
+file.) Same `--config` caveat as above applies — a release install has no `config.toml`
+bundled next to it either.
+
 ## Configuration
 
 Behavior is driven by [config.toml](config.toml), which the script reads by default

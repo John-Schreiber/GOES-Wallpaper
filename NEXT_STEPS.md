@@ -55,34 +55,32 @@ A few non-obvious things learned while building and testing this, not really
    and doesn't use capture-time-sync scheduling (no single "the" source to learn a
    phase from when several are fetched per cycle — falls back to plain
    clock-boundary alignment). Worth revisiting if precise timing matters here too.
-5. **No commits made to this repo yet** — everything is unstaged/untracked
-   working-tree edits.
-6. **`CUSTOM_IMAGERY_PLAN.md`'s Option B (satpy raw-composite) is explicitly
+5. **`CUSTOM_IMAGERY_PLAN.md`'s Option B (satpy raw-composite) is explicitly
    deferred**, not abandoned.
-7. **Overlay line support** (not just points/markers) — e.g. custom state/county
+6. **Overlay line support** (not just points/markers) — e.g. custom state/county
    borders, storm tracks, flight/shipping routes. `lonlat_to_pixels()` already
    supports arbitrary lon/lat arrays, so this is mostly "add a vector data source
    (GeoJSON/shapefile) and a polyline-drawing loop," same shape as `draw_graticule`
    generalized to arbitrary line strings instead of a fixed lat/lon grid.
-8. **API/tool for lat/lon lookup** — `overlay_cities` entries need `lon`/`lat` typed
+7. **API/tool for lat/lon lookup** — `overlay_cities` entries need `lon`/`lat` typed
    in by hand. A geocoding lookup would remove that friction. Needs a data-source
    decision: bundled offline dataset (no network dependency, another thing to
    vendor/maintain) vs. a geocoding API call (network dependency, rate limits,
    offline behavior needs deciding).
-9. **Configurable overlay icons** — `overlay_cities` currently always draws a plain
+8. **Configurable overlay icons** — `overlay_cities` currently always draws a plain
    circle marker. Custom per-marker icons would need an icon-path field on
    `CityMarker`, image loading/caching, and compositing at the projected pixel
    position (`Image.alpha_composite`, same pattern `draw_graticule` uses).
-10. **Plugin interface for overlays**, so overlay content isn't limited to the
-    hardcoded graticule/city-marker types — a registered provider could hit an API on
-    every refresh cycle for genuinely dynamic content (live weather alerts, flight or
-    ship positions, wildfire perimeters). Shape: an `OverlayProvider` protocol
-    (`fetch(source, now) -> features`, `render(img, features, cfg) -> Image`) that
-    `draw_overlays()` iterates over, configured via `[[overlay_plugins]]` (same shape
-    as `[[combos]]`). Needs deciding: per-provider timeout/failure isolation (one
-    broken API shouldn't break the whole update), caching/rate-limit handling, and
-    whether providers need their own fetch cadence independent of the image refresh.
-11. **Reduce prebaked config settings/magic numbers.** Accumulated a fair number of
+9. **Plugin interface for overlays**, so overlay content isn't limited to the
+   hardcoded graticule/city-marker types — a registered provider could hit an API on
+   every refresh cycle for genuinely dynamic content (live weather alerts, flight or
+   ship positions, wildfire perimeters). Shape: an `OverlayProvider` protocol
+   (`fetch(source, now) -> features`, `render(img, features, cfg) -> Image`) that
+   `draw_overlays()` iterates over, configured via `[[overlay_plugins]]` (same shape
+   as `[[combos]]`). Needs deciding: per-provider timeout/failure isolation (one
+   broken API shouldn't break the whole update), caching/rate-limit handling, and
+   whether providers need their own fetch cadence independent of the image refresh.
+10. **Reduce prebaked config settings/magic numbers.** Accumulated a fair number of
     hardcoded numeric defaults, some duplicated, some empirically derived once and
     never revisited — worth an audit pass, especially before a second platform
     backend multiplies some of this. Examples: the overlay-sizing "reference width"
@@ -94,7 +92,7 @@ A few non-obvious things learned while building and testing this, not really
     names to two different Windows-specific numeric schemes, easy to drift out of
     sync. Direction: centralize what must stay hardcoded as named constants with
     provenance comments, derive at runtime where feasible.
-12. **Only the Windows backend exists and was tested.** `platform_base.
+11. **Only the Windows backend exists and was tested.** `platform_base.
     WallpaperPlatform`'s abstract interface was only ever exercised through
     `WindowsPlatform` — there's no second implementation (real or stub) yet to
     confirm the interface is actually well-shaped for a genuinely different OS's
@@ -102,7 +100,7 @@ A few non-obvious things learned while building and testing this, not really
     "set wallpaper" mechanism the way Windows does; some of the interface's
     assumptions, like a single taskbar height or per-monitor wallpaper support
     existing at all, may not hold everywhere).
-13. **Wire power/network awareness into more places, and add reduced-frequency modes
+12. **Wire power/network awareness into more places, and add reduced-frequency modes
     (not just binary skip/downgrade).** Currently `skip_on_battery` skips a cycle
     entirely and `metered_resolution` downgrades image size — both all-or-nothing.
     Worth adding: a `--loop` interval multiplier for battery/metered state instead of
@@ -114,7 +112,7 @@ A few non-obvious things learned while building and testing this, not really
     overlay rendering, or reducing `per_monitor` mode to just its primary monitor);
     and applying both settings per-monitor in `per_monitor` mode instead of only as a
     whole-cycle skip.
-14. **Lock screen support** — set the Windows lock screen image, not just the desktop
+13. **Lock screen support** — set the Windows lock screen image, not just the desktop
     wallpaper. Meaningfully more friction than desktop wallpaper, worth scoping
     carefully before starting:
     - The "proper" API is WinRT `Windows.System.UserProfile.LockScreen.
@@ -137,3 +135,12 @@ A few non-obvious things learned while building and testing this, not really
       portrait-oriented crop makes more sense for a lock screen than the desktop's
       landscape cover-crop) — affects whether this reuses the existing render or
       needs its own pass.
+14. **A frozen standalone executable** (PyInstaller/Nuitka), so a non-technical
+    Windows user could download and run without installing Python/uv at all.
+    Explicitly backlogged behind the package-install path (`uv build`/`pip install .`/
+    the GitHub Release wheel), which was the priority for the first release. Real risk
+    worth flagging when this is picked up: the `winrt` packages use dynamic code
+    generation/loading under the hood, which PyInstaller-style freezing sometimes
+    doesn't handle cleanly — would need dedicated testing, possibly a documented
+    fallback (skip power/network detection gracefully) if freezing that dependency
+    turns out to be unreliable.
