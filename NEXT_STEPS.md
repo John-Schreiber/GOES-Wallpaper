@@ -197,14 +197,25 @@ A few non-obvious things learned while building and testing this, not really
     `_WALLPAPER_STYLE_CODES` dict of `_StyleCodes` tuples, so the two schemes can't
     drift out of sync. `_GEOS_AREA_CONUS` and `trim_source_caption_frac` already
     carried adequate provenance/re-derivation comments and were left as-is.
-11. **Only the Windows backend exists and was tested.** `platform_base.
-    WallpaperPlatform`'s abstract interface was only ever exercised through
-    `WindowsPlatform` — there's no second implementation (real or stub) yet to
-    confirm the interface is actually well-shaped for a genuinely different OS's
-    constraints (Linux desktop environments don't have a single universal
-    "set wallpaper" mechanism the way Windows does; some of the interface's
-    assumptions, like a single taskbar height or per-monitor wallpaper support
-    existing at all, may not hold everywhere).
+11. **A second backend now exists and single-monitor wallpaper apply is verified on
+    real hardware.** `platform_linux_kde.KDEPlatform` (KDE Plasma, via `qdbus`/
+    `qdbus6` `evaluateScript` scripting and `plasma-apply-wallpaperimage`) was built
+    from KDE's own docs and working community examples — see the module docstring
+    for sources. A live run against a real Plasma session confirmed the default
+    (single-screen, `combo_mode = "single"`) path end to end: `get_screen_size()`
+    detection and `apply_wallpaper()` were exercised for real, and the desktop's
+    `org.kde.image` config (queried directly via `qdbus6 ... evaluateScript`) showed
+    it pointing at the freshly-rendered file after each run. Confirms the interface
+    shape is workable for a second OS (`WallpaperPlatform`'s abstract methods all had
+    a reasonable KDE implementation, including the "not every style is supported"
+    escape hatch the docstring anticipated — KDE has no equivalent of Windows'
+    `span`), but `per_monitor` combo mode, real multi-monitor geometry/assignment,
+    panel-height detection against an actual panel, and `upower`/`nmcli` parsing on
+    real hardware are all still outstanding — only exercised via the unit tests'
+    mocked subprocess output so far, not a live multi-monitor/battery/metered-network
+    setup. GNOME/other Linux DEs remain unimplemented — `platform_base.
+    get_platform()` raises `NotImplementedError` for any `XDG_CURRENT_DESKTOP` that
+    doesn't contain "kde".
 12. **Wire power/network awareness into more places, and add reduced-frequency modes
     (not just binary skip/downgrade).** Currently `skip_on_battery` skips a cycle
     entirely and `metered_resolution` downgrades image size — both all-or-nothing.
@@ -335,3 +346,16 @@ A few non-obvious things learned while building and testing this, not really
     config change. Full-frame RGBA PNGs at 5000x3000 aren't tiny — a cheap fix is
     deleting cache files whose `.json` sidecar hasn't matched in N days, or capping
     the count. Fold into whatever cache shape gap 16's per-combo work lands on.
+20. **Platform selection is hardcoded, not configurable.** `platform_base.
+    get_platform()` picks a backend purely from `sys.platform` plus (on Linux)
+    sniffing `XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP` for `"kde"`. That sniffing
+    is a real gap now that a second backend exists: it breaks for anyone running
+    Plasma without those env vars set correctly (some display managers/session
+    types don't populate them reliably), and there's no way to force a backend for
+    testing or an unusual setup (e.g. a KDE session where `XDG_CURRENT_DESKTOP`
+    reports something else, or the reverse — forcing the KDE backend under a
+    KDE-compatible-but-differently-labeled session). Worth adding a `platform`
+    override in `config.toml`/CLI (`"auto"` default preserving today's detection,
+    plus explicit `"windows"`/`"kde"` values) that short-circuits
+    `get_platform()`'s sniffing — same shape as `width_override`/`height_override`
+    already short-circuiting screen-size autodetection.

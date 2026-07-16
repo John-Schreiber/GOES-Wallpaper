@@ -32,6 +32,7 @@ the platform layer decoupled from the app's config schema.
 
 from __future__ import annotations
 
+import os
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -140,6 +141,21 @@ def get_platform() -> WallpaperPlatform:
     if sys.platform == "win32":
         from platform_windows import WindowsPlatform
         return WindowsPlatform()
+    if sys.platform.startswith("linux"):
+        desktop = (
+            os.environ.get("XDG_CURRENT_DESKTOP", "")
+            + os.environ.get("XDG_SESSION_DESKTOP", "")
+        ).lower()
+        if "kde" in desktop:
+            from platform_linux_kde import KDEPlatform
+            return KDEPlatform()
+        raise NotImplementedError(
+            f"No WallpaperPlatform backend for this desktop environment "
+            f"(XDG_CURRENT_DESKTOP={os.environ.get('XDG_CURRENT_DESKTOP')!r}) yet.\n"
+            "Only KDE Plasma (platform_linux_kde.KDEPlatform) is implemented so far "
+            "on Linux. To add another: implement platform_base.WallpaperPlatform in "
+            "a new platform_<name>.py and add a branch here."
+        )
     raise NotImplementedError(
         f"No WallpaperPlatform backend for sys.platform={sys.platform!r} yet.\n"
         "To add one: implement platform_base.WallpaperPlatform (see "

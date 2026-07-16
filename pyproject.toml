@@ -71,4 +71,10 @@ testpaths = ["tests"]
 # platform_windows as top-level sibling modules (not relative/package-qualified), so
 # all three need to land next to each other in the wheel, matching how they sit in
 # the repo.
-include = ["goes_wallpaper.py", "platform_base.py", "platform_windows.py", "source_satpy.py"]
+include = [
+    "goes_wallpaper.py",
+    "platform_base.py",
+    "platform_windows.py",
+    "platform_linux_kde.py",
+    "source_satpy.py",
+]
