@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "goes-wallpaper"
+version = "2.0.0"
+description = "Update a Windows desktop wallpaper to the latest GOES satellite image"
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "Pillow>=10.0",
+    "pyproj>=3.7.2",
+    "numpy>=2.4.6",
+    "comtypes>=1.4.16; sys_platform == 'win32'",
+    "winrt-windows-networking-connectivity>=3.2.1; sys_platform == 'win32'",
+    "winrt-windows-system-power>=3.2.1; sys_platform == 'win32'",
+]
+
+[project.scripts]
+goes-wallpaper = "goes_wallpaper:main"
+
+[project.gui-scripts]
+# pythonw-style: no console window, for a shortcut/Task Scheduler-style launch.
+goes-wallpaperw = "goes_wallpaper:main"
+
+[dependency-groups]
+dev = [
+    "types-requests",
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+# Flat layout, not a package directory -- goes_wallpaper.py imports platform_base/
+# platform_windows as top-level sibling modules (not relative/package-qualified), so
+# all three need to land next to each other in the wheel, matching how they sit in
+# the repo.
+include = ["goes_wallpaper.py", "platform_base.py", "platform_windows.py"]

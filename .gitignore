@@ -1,0 +1,11 @@
+.venv/
+*.egg-info/
+__pycache__/
+*.pyc
+dist/
+.pytest_cache/
+smoke-test-venv/
+
+# Working notes for the release-prep pass, not meant as a durable repo doc -- its
+# content has already been distributed into README/CHANGELOG/CONTRIBUTING/ATTRIBUTION.
+RELEASE_PLAN.md

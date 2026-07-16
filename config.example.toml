@@ -1,0 +1,28 @@
+# Minimal starting point for goes_wallpaper.py --config.
+#
+# This is deliberately short — just the settings most people actually want to change
+# on day one. Every other option (source-crop framing, multi-source combos,
+# georeferenced overlays, freshness-sync tuning, power/network-aware fallbacks, ...)
+# has its own documented default and doesn't need to be listed here to work; see
+# config.toml in the repo for the full annotated reference if you want to see or
+# override everything.
+#
+# Copy this file, edit what you want, then run:
+#   goes-wallpaper --config path\to\your-config.toml
+# (or, from a source checkout: uv run python goes_wallpaper.py --config ...)
+
+# --- Source image ---
+satellite = "GOES19"      # GOES19 (East) or GOES18 (West)
+sector = "CONUS"           # CONUS | FD (Full Disk) | M1 | M2 (Mesoscale)
+product = "GEOCOLOR"
+resolution = "5000x3000"   # covers a 4K monitor without upsampling; see config.toml for other sizes
+
+# --- Output ---
+wallpaper_style = "fill"   # fill | fit | stretch | tile | center | span
+
+# --- Scheduling ---
+# Leave loop = false (the default) to run once and exit -- pair with Windows Task
+# Scheduler for periodic updates (see README). Set loop = true to instead run
+# continuously, sleeping between cycles on its own.
+loop = false
+interval_minutes = 5

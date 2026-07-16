@@ -1,0 +1,40 @@
+name: Release
+
+# Triggered by pushing a version tag, e.g.:
+#   git tag v2.0.0 && git push origin v2.0.0
+# Builds the package and attaches the wheel/sdist to a GitHub Release. Deliberately
+# does NOT publish to PyPI -- that's a much harder-to-reverse, more public action
+# (claiming the package name on the public index) that needs its own opt-in decision
+# and a PYPI_API_TOKEN secret provisioned in this repo's settings. Add a
+# `pypa/gh-action-pypi-publish` step here if/when that's wanted.
+
+"on":
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Build
+        run: uv build
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "${{ github.ref_name }}" \
+            --generate-notes

@@ -1,0 +1,1192 @@
+# goes_wallpaper.py -- update the desktop wallpaper from a GOES satellite image
+#
+# Run directly (`uv run python goes_wallpaper.py` / `pythonw.exe goes_wallpaper.py`
+# for no console window), or via the installed `goes-wallpaper`/`goes-wallpaperw`
+# entry points (see pyproject.toml) once packaged.
+#
+# Copyright (C) 2026 John-Schreiber
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+# Originally based on pjlhjr/GOES-Wallpaper (Apache License 2.0); substantially
+# rewritten since. See ATTRIBUTION.md for the full history and third-party notices.
+
+"""Download the latest GOES satellite image and set it as the desktop wallpaper.
+
+Fetches an image from NOAA STAR's GOES CDN (https://cdn.star.nesdis.noaa.gov), crops it
+to the exact screen resolution, optionally overlays an info block with capture metadata,
+and applies it as the wallpaper. Configurable via CLI flags and/or a TOML config file.
+
+OS-specific operations (applying the wallpaper, screen/monitor detection, taskbar/dock
+avoidance, power/network state) live behind platform_base.WallpaperPlatform — see that
+module for the interface and platform_windows.py for the (currently only) backend.
+"""
+
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import logging
+import random
+import sys
+import time
+import tomllib
+from dataclasses import dataclass, fields, replace
+from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import requests
+from PIL import Image, ImageDraw, ImageFont
+from pyproj import CRS, Transformer
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from platform_base import MonitorInfo, WallpaperPlatform, WALLPAPER_STYLE_NAMES, get_platform
+
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
+
+DEFAULT_DATA_DIR = Path.home() / "AppData" / "Local" / "GOES-Wallpaper"
+DEFAULT_CONFIG_PATH = Path(__file__).with_name("config.toml")
+
+# Human-friendly labels for known satellites/sectors, used only for the info block.
+SATELLITE_LABELS = {
+    "GOES16": "GOES-16",
+    "GOES18": "GOES-18 (West)",
+    "GOES19": "GOES-19 (East)",
+}
+SECTOR_LABELS = {
+    "CONUS": "Continental US",
+    "FD": "Full Disk",
+    "M1": "Mesoscale 1",
+    "M2": "Mesoscale 2",
+}
+
+
+def build_image_url(satellite: str, sector: str, product: str, resolution: str) -> str:
+    base = f"https://cdn.star.nesdis.noaa.gov/{satellite}/ABI/{sector}/{product}"
+    name = "latest.jpg" if resolution == "latest" else f"{resolution}.jpg"
+    return f"{base}/{name}"
+
+
+@dataclass(slots=True)
+class Combo:
+    """A named source+crop combo for combo_mode = "rotate"/"per_monitor". Any source
+    field left unset (None) falls back to the top-level Config value; the crop fields
+    always apply (default: no crop). `monitor` (0-based, matching the enumeration
+    order IDesktopWallpaper reports) is required for "per_monitor" and ignored for
+    "rotate"."""
+    name: str
+    satellite: str | None = None
+    sector: str | None = None
+    product: str | None = None
+    resolution: str | None = None
+    crop_left: float = 0.0
+    crop_top: float = 0.0
+    crop_right: float = 1.0
+    crop_bottom: float = 1.0
+    monitor: int | None = None
+
+
+@dataclass(slots=True)
+class CityMarker:
+    """A labeled point for overlay_cities (georeferenced overlay, CONUS only)."""
+    name: str
+    lon: float
+    lat: float
+
+
+@dataclass(slots=True)
+class Config:
+    # Source image selection
+    satellite: str = "GOES19"
+    sector: str = "CONUS"
+    product: str = "GEOCOLOR"
+    # NOAA serves several discrete sizes per sector, not an arbitrary resize — verified
+    # for CONUS: 625x375, 1250x750, 2500x1500, 5000x3000, 10000x6000 (the last is
+    # native ABI band-2 resolution). "latest" resolves to 5000x3000 for CONUS, one tier
+    # below the true max. Default here is 5000x3000 so a full-frame crop already covers
+    # a 4K (3840x2160) monitor without upsampling; bump to "10000x6000" if you crop
+    # aggressively (source_crop_*/combo crop_*) and need more headroom, at the cost of
+    # a much bigger download every cycle. Full Disk's tiers are different (verified:
+    # 1808x1808, 5424x5424, 10848x10848); Mesoscale wasn't verified — check with curl
+    # against a few candidate WxH values before relying on a specific size there.
+    resolution: str = "5000x3000"
+
+    # Output
+    data_dir: Path = DEFAULT_DATA_DIR
+    wallpaper_style: str = "fill"  # fill | fit | stretch | tile | center | span
+
+    # Screen handling
+    crop_to_screen: bool = True
+    crop_anchor: float = 0.5  # 0.0 = top/left, 0.5 = center, 1.0 = bottom/right
+    screen_width: int | None = None  # override auto-detection
+    screen_height: int | None = None
+    span_all_monitors: bool = False  # crop to the full virtual desktop instead of the
+    # primary monitor; pair with wallpaper_style = "span" so Windows stretches the one
+    # image across all displays instead of just mirroring it onto the primary.
+
+    # GetSystemMetrics reports a fake 1024x768 when the process isn't attached to an
+    # interactive window station (e.g. a "run whether user is logged on or not" task).
+    # WMI reads the video driver's current mode directly and isn't affected by that, so
+    # it's tried as an automatic fallback before falling back to the 1024x768 default
+    # (only applies to the single-monitor case — span_all_monitors still needs an
+    # explicit screen_width/screen_height override in that scenario).
+    wmi_screen_size_fallback: bool = True
+
+    # NOAA bakes a white caption strip (timestamp/satellite/band legend) into the
+    # bottom of every source image. Trim it before our own crop/info-block so it
+    # doesn't get randomly kept/cut by the cover-crop or collide with our overlay.
+    trim_source_caption: bool = True
+    trim_source_caption_frac: float = 0.02  # measured ~0.0187 on a 1500px-tall CONUS frame
+
+    # Region-of-interest crop applied to the source image (after caption trim, before
+    # the screen-fit cover-crop below). Fractions of the trimmed image, 0.0-1.0 each.
+    # Defaults to the full frame (no-op). Useful for framing a sub-region instead of
+    # letting the cover-crop's resize+crop discard it unpredictably, and to cut off
+    # NOAA's logo watermark (bottom-left corner of every frame on this CDN) — note this
+    # can only trim edges, it can't remove things baked in across the whole frame like
+    # the state/country border lines NOAA overlays on every product.
+    source_crop_left: float = 0.0
+    source_crop_top: float = 0.0
+    source_crop_right: float = 1.0
+    source_crop_bottom: float = 1.0
+
+    # Georeferenced overlays drawn on the raw fetched frame, before any of our own
+    # trim/crop/resize (so the pixel grid matches the calibration below). CONUS only —
+    # the calibration constants (GEOS projection extent per satellite) were derived
+    # from one real ABI L1b CONUS file per satellite and validated against 10 known
+    # city landmarks (median error well under a pixel at 2500x1500); Full Disk and
+    # Mesoscale aren't supported (Mesoscale's extent isn't fixed — it moves — so it
+    # can't be hardcoded the same way). Adds to, doesn't replace, NOAA's own baked-in
+    # state lines — this can't remove those, see source_crop_* above.
+    overlay_graticule: bool = False
+    overlay_graticule_step_deg: float = 10.0
+    overlay_graticule_color: tuple[int, int, int] = (255, 255, 0)
+    overlay_graticule_opacity: int = 110  # 0-255
+    overlay_cities: tuple[CityMarker, ...] = ()
+    overlay_city_marker_radius: int = 5
+    overlay_city_color: tuple[int, int, int] = (255, 60, 60)
+    overlay_city_font_size: int = 18
+
+    # Multiple named source+crop combos (see the Combo dataclass), and how to use
+    # them. combos are ignored entirely in "single" mode (the default — just the
+    # top-level satellite/sector/product/resolution/source_crop_* fields above).
+    #   "single"      - today's behavior; combos ignored.
+    #   "rotate"      - cycle through combos one per cycle (index persisted in
+    #                   state.json), applied as a single wallpaper like "single" mode.
+    #   "per_monitor" - each combo's `monitor` index gets its own independently
+    #                   rendered+applied wallpaper via Windows' per-monitor wallpaper
+    #                   API. Every combo must set `monitor` in this mode.
+    combos: tuple[Combo, ...] = ()
+    combo_mode: str = "single"
+
+    # Info block overlay
+    info_block: bool = True
+    info_block_height_frac: float = 0.055
+    info_block_opacity: int = 160  # 0-255
+    info_font_path: str = r"C:\Windows\Fonts\segoeui.ttf"
+    # The desktop wallpaper renders full-screen behind the taskbar, so a bar drawn at
+    # the very bottom edge gets clipped by it. When enabled, the info bar is nudged up
+    # by the taskbar's actual current height (queried live, so it tracks the user's
+    # taskbar size/DPI) instead of a guessed constant. Best-effort/primary-monitor only.
+    avoid_taskbar: bool = True
+
+    # Networking / retries
+    timeout_connect: float = 10.0
+    timeout_read: float = 30.0
+    max_retries: int = 5
+    backoff_factor: float = 1.5
+    retry_statuses: tuple[int, ...] = (429, 500, 502, 503, 504)
+    user_agent: str = "goes-wallpaper/2.0 (+https://github.com/pjlhjr/GOES-Wallpaper)"
+
+    # Scheduling (only used with --loop)
+    loop: bool = False
+    interval_minutes: int = 5
+    align_to_clock: bool = True
+    jitter_seconds: float = 3.0
+
+    # NOAA doesn't publish a new frame exactly on the clock boundary — there's a
+    # processing/CDN lag after each scan. `sync_to_capture_time` learns that lag from
+    # each frame's actual capture time (Last-Modified) and schedules the *next* wake-up
+    # shortly after the next frame should land, instead of guessing at the raw
+    # boundary. `wait_for_fresh_capture` complements this within a single cycle: if the
+    # download comes back with the same capture time as last time (the new frame just
+    # hasn't posted yet), retry a few times instead of applying a stale image.
+    sync_to_capture_time: bool = True
+    capture_offset_buffer_seconds: float = 20.0  # CDN propagation cushion after the learned publish time
+    wait_for_fresh_capture: bool = True
+    fresh_retry_interval_seconds: float = 15.0
+    max_fresh_wait_seconds: float = 90.0
+
+    # For Task Scheduler-style single-shot use: if the trigger fires right at (or
+    # shortly before) the clock boundary and we've already learned this source's
+    # publish phase from a prior run, sleep once until shortly after the next frame
+    # should land instead of fetching immediately and relying on
+    # wait_for_fresh_capture's poll-and-retry loop above (which still runs as a
+    # backstop if this wait target turns out to be a bit early). No-op until a phase
+    # has been learned, and capped by wait_for_sync_max_seconds so a Task Scheduler
+    # trigger interval that doesn't match interval_minutes can't hang the task for
+    # most of a cycle. Harmless (near-zero-wait) with --loop too, since run_loop's own
+    # inter-cycle scheduling already lands wake-ups at this same target.
+    wait_for_sync_time: bool = False
+    wait_for_sync_max_seconds: float = 150.0
+
+    # Power/network-aware fallbacks for expensive operations (large image downloads,
+    # per-monitor mode's multiple fetches per cycle). Both go through
+    # WallpaperPlatform, which degrades to "unknown" (None) gracefully on
+    # platforms/hardware that can't detect this — unknown is always treated as "not
+    # constrained," never as a guess to skip/downgrade on. Both default off so
+    # today's behavior is unchanged unless opted into.
+    skip_on_battery: bool = False    # skip the whole cycle if running on battery power
+    metered_resolution: str | None = None  # override `resolution` when the network is metered (None = no override)
+
+    # Misc
+    skip_if_unchanged: bool = True
+    log_level: str = "INFO"
+
+    @property
+    def image_url(self) -> str:
+        return build_image_url(self.satellite, self.sector, self.product, self.resolution)
+
+    @property
+    def wallpaper_path(self) -> Path:
+        return self.data_dir / "wallpaper.jpg"
+
+    @property
+    def metadata_path(self) -> Path:
+        return self.data_dir / "wallpaper.json"
+
+    @property
+    def state_path(self) -> Path:
+        return self.data_dir / "state.json"
+
+    @property
+    def log_path(self) -> Path:
+        return self.data_dir / "log.txt"
+
+
+def load_config(config_path: Path, overrides: dict[str, Any]) -> Config:
+    """Build a Config from an optional TOML file, then apply CLI overrides on top."""
+    values: dict[str, Any] = {}
+    if config_path.exists():
+        with config_path.open("rb") as f:
+            values.update(tomllib.load(f))
+
+    valid_fields = {f.name for f in fields(Config)}
+    unknown = set(values) - valid_fields
+    if unknown:
+        raise ValueError(f"Unknown config key(s) in {config_path}: {', '.join(sorted(unknown))}")
+
+    values.update({k: v for k, v in overrides.items() if v is not None})
+
+    if "data_dir" in values:
+        values["data_dir"] = Path(values["data_dir"])
+    if "retry_statuses" in values:
+        values["retry_statuses"] = tuple(values["retry_statuses"])
+    if "overlay_graticule_color" in values:
+        values["overlay_graticule_color"] = tuple(values["overlay_graticule_color"])
+    if "overlay_city_color" in values:
+        values["overlay_city_color"] = tuple(values["overlay_city_color"])
+    if "combos" in values:
+        combo_fields = {f.name for f in fields(Combo)}
+        parsed = []
+        for i, combo_dict in enumerate(values["combos"]):
+            unknown_keys = set(combo_dict) - combo_fields
+            if unknown_keys:
+                raise ValueError(f"Unknown key(s) in combos[{i}]: {', '.join(sorted(unknown_keys))}")
+            parsed.append(Combo(**combo_dict))
+        values["combos"] = tuple(parsed)
+    if "overlay_cities" in values:
+        city_fields = {f.name for f in fields(CityMarker)}
+        parsed = []
+        for i, city_dict in enumerate(values["overlay_cities"]):
+            unknown_keys = set(city_dict) - city_fields
+            if unknown_keys:
+                raise ValueError(f"Unknown key(s) in overlay_cities[{i}]: {', '.join(sorted(unknown_keys))}")
+            parsed.append(CityMarker(**city_dict))
+        values["overlay_cities"] = tuple(parsed)
+
+    return Config(**values)
+
+
+def validate_combos(cfg: Config) -> None:
+    valid_modes = {"single", "rotate", "per_monitor"}
+    if cfg.combo_mode not in valid_modes:
+        raise ValueError(f"combo_mode must be one of {sorted(valid_modes)}, got {cfg.combo_mode!r}")
+    if cfg.combo_mode == "single":
+        return
+
+    if not cfg.combos:
+        raise ValueError(f'combo_mode = "{cfg.combo_mode}" requires at least one [[combos]] entry')
+
+    names = [c.name for c in cfg.combos]
+    if len(names) != len(set(names)):
+        raise ValueError(f"combo names must be unique: {names}")
+
+    if cfg.combo_mode == "per_monitor":
+        missing = [c.name for c in cfg.combos if c.monitor is None]
+        if missing:
+            raise ValueError(
+                f'combo_mode = "per_monitor" requires every combo to set `monitor`; '
+                f"missing on: {missing}"
+            )
+        monitor_indices = [c.monitor for c in cfg.combos]
+        if len(monitor_indices) != len(set(monitor_indices)):
+            raise ValueError(f"combo `monitor` indices must be unique: {monitor_indices}")
+
+
+@dataclass(slots=True)
+class EffectiveSource:
+    """The fully-resolved satellite/sector/product/resolution/crop for one cycle —
+    either the top-level Config (combo=None) or a Combo with its unset fields filled
+    in from Config."""
+    name: str
+    satellite: str
+    sector: str
+    product: str
+    resolution: str
+    crop_left: float
+    crop_top: float
+    crop_right: float
+    crop_bottom: float
+
+    @property
+    def image_url(self) -> str:
+        return build_image_url(self.satellite, self.sector, self.product, self.resolution)
+
+    @property
+    def key(self) -> str:
+        """Identifies this exact source for per-source state (ETag/capture-time/
+        learned publish phase), so unrelated sources sharing one config never mix up
+        each other's freshness tracking."""
+        return f"{self.satellite}/{self.sector}/{self.product}/{self.resolution}"
+
+    def satellite_label(self) -> str:
+        return SATELLITE_LABELS.get(self.satellite, self.satellite)
+
+    def sector_label(self) -> str:
+        return SECTOR_LABELS.get(self.sector, self.sector)
+
+
+def resolve_source(cfg: Config, combo: Combo | None) -> EffectiveSource:
+    if combo is None:
+        return EffectiveSource(
+            name="default",
+            satellite=cfg.satellite,
+            sector=cfg.sector,
+            product=cfg.product,
+            resolution=cfg.resolution,
+            crop_left=cfg.source_crop_left,
+            crop_top=cfg.source_crop_top,
+            crop_right=cfg.source_crop_right,
+            crop_bottom=cfg.source_crop_bottom,
+        )
+    return EffectiveSource(
+        name=combo.name,
+        satellite=combo.satellite or cfg.satellite,
+        sector=combo.sector or cfg.sector,
+        product=combo.product or cfg.product,
+        resolution=combo.resolution or cfg.resolution,
+        crop_left=combo.crop_left,
+        crop_top=combo.crop_top,
+        crop_right=combo.crop_right,
+        crop_bottom=combo.crop_bottom,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Logging
+# --------------------------------------------------------------------------- #
+
+def setup_logging(cfg: Config) -> None:
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        cfg.log_path,
+        mode="a",
+        maxBytes=1024 * 1024,
+        backupCount=2,
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+
+    root = logging.getLogger()
+    root.setLevel(cfg.log_level)
+    root.handlers.clear()
+    root.addHandler(handler)
+
+
+# --------------------------------------------------------------------------- #
+# Networking
+# --------------------------------------------------------------------------- #
+
+def build_session(cfg: Config) -> requests.Session:
+    """Session with connection-level retries (backoff on transient failures/HTTP 5xx/429)."""
+    session = requests.Session()
+    session.headers["User-Agent"] = cfg.user_agent
+
+    retry = Retry(
+        total=cfg.max_retries,
+        connect=cfg.max_retries,
+        read=cfg.max_retries,
+        status=cfg.max_retries,
+        backoff_factor=cfg.backoff_factor,
+        status_forcelist=cfg.retry_statuses,
+        allowed_methods=("GET", "HEAD"),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def load_state(cfg: Config) -> dict[str, Any]:
+    if cfg.state_path.exists():
+        try:
+            return json.loads(cfg.state_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            logging.warning("Could not read state file, starting fresh")
+    return {}
+
+
+def save_state(cfg: Config, state: dict[str, Any]) -> None:
+    cfg.state_path.write_text(json.dumps(state, indent=2))
+
+
+def fetch_image(cfg: Config, session: requests.Session, url: str, prev_etag: str | None) -> tuple[bytes, dict[str, str]] | None:
+    """Download the image at url. Returns None if the server reports no change (304)."""
+    headers = {}
+    if prev_etag:
+        headers["If-None-Match"] = prev_etag
+
+    logging.info("Requesting %s", url)
+    resp = session.get(
+        url,
+        headers=headers,
+        timeout=(cfg.timeout_connect, cfg.timeout_read),
+    )
+
+    if resp.status_code == 304:
+        logging.info("Server reports no change since last download (304)")
+        return None
+
+    resp.raise_for_status()
+
+    content_type = resp.headers.get("content-type", "")
+    if "image/jpeg" not in content_type:
+        raise ValueError(f"Unexpected content-type: {content_type!r}")
+
+    headers = {k.lower(): v for k, v in resp.headers.items()}
+    return resp.content, headers
+
+
+def parse_capture_time(headers: dict[str, str]) -> str | None:
+    """Parse the source frame's actual capture time from the HTTP Last-Modified header."""
+    last_modified = headers.get("last-modified")
+    if not last_modified:
+        return None
+    try:
+        return (
+            datetime.strptime(last_modified, "%a, %d %b %Y %H:%M:%S %Z")
+            .replace(tzinfo=timezone.utc)
+            .isoformat()
+        )
+    except ValueError:
+        return None
+
+
+def fetch_fresh_image(
+    cfg: Config,
+    session: requests.Session,
+    url: str,
+    prev_etag: str | None,
+    prev_capture_time: str | None,
+    deadline: float,
+) -> tuple[bytes, dict[str, str]] | None:
+    """Fetch the image at url, retrying briefly if the CDN is still serving the
+    previous frame (same capture time as last cycle) so we don't apply stale content
+    when a fresher one is expected imminently."""
+    while True:
+        result = fetch_image(cfg, session, url, prev_etag)
+        if result is None:
+            return None  # genuinely unchanged (304)
+
+        content, headers = result
+        if not cfg.wait_for_fresh_capture or prev_capture_time is None:
+            return content, headers
+
+        capture_time = parse_capture_time(headers)
+        if capture_time is None or capture_time != prev_capture_time:
+            return content, headers
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logging.info(
+                "Still on previous capture (%s) after waiting; using it anyway", capture_time
+            )
+            return content, headers
+
+        wait = min(cfg.fresh_retry_interval_seconds, remaining)
+        logging.info(
+            "Downloaded content but capture time is unchanged (%s); retrying in %.0fs",
+            capture_time, wait,
+        )
+        time.sleep(wait)
+
+
+# --------------------------------------------------------------------------- #
+# Screen handling
+# --------------------------------------------------------------------------- #
+
+def trim_source_caption(img: Image.Image, frac: float) -> Image.Image:
+    """Cut NOAA's own baked-in caption strip off the bottom of the source image."""
+    width, height = img.size
+    trim_px = round(height * frac)
+    if trim_px <= 0:
+        return img
+    return img.crop((0, 0, width, height - trim_px))
+
+
+def crop_fractional(img: Image.Image, left: float, top: float, right: float, bottom: float) -> Image.Image:
+    """Crop to a region of interest *before* the screen-fit cover-crop, so that region
+    (rather than the cover-crop's own resize+crop) controls what survives — e.g. to
+    frame a sub-area, or trim NOAA's logo watermark."""
+    if (left, top, right, bottom) == (0.0, 0.0, 1.0, 1.0):
+        return img
+    width, height = img.size
+    return img.crop((round(left * width), round(top * height), round(right * width), round(bottom * height)))
+
+
+def crop_to_screen(img: Image.Image, screen_size: tuple[int, int], anchor: float) -> Image.Image:
+    """Resize+center-crop (CSS 'cover' style) so the image exactly fills the screen
+    without the stretching/letterboxing that Windows' own scaling can introduce."""
+    target_w, target_h = screen_size
+    src_w, src_h = img.size
+    scale = max(target_w / src_w, target_h / src_h)
+    new_w, new_h = round(src_w * scale), round(src_h * scale)
+    resized = img.resize((new_w, new_h), Image.LANCZOS)
+
+    excess_x = new_w - target_w
+    excess_y = new_h - target_h
+    left = round(excess_x * anchor)
+    top = round(excess_y * anchor)
+    return resized.crop((left, top, left + target_w, top + target_h))
+
+
+# --------------------------------------------------------------------------- #
+# Georeferenced overlays (CONUS only)
+# --------------------------------------------------------------------------- #
+
+# GEOS projection extent (meters) for each satellite's CONUS sector, as served by
+# NOAA STAR's CDN. Derived by loading one real ABI L1b CONUS radiance file per
+# satellite with satpy and reading its area definition — not a resize/crop of the
+# full-disk grid, this is the CONUS sector's own fixed extent (Mesoscale sectors move
+# and can't be hardcoded this way; Full Disk wasn't calibrated). Validated by
+# projecting 10 known city landmarks (5 per satellite) and confirming they land on the
+# correct city/coastline in a real fetched frame.
+_GEOS_AREA_CONUS = {
+    "GOES18": {"lon_0": -137.0, "extent": (-2505021.61, 1583173.65752, 2505021.61, 4589199.58952)},
+    "GOES19": {"lon_0": -75.0, "extent": (-3627271.29128, 1583173.65752, 1382771.92872, 4589199.58952)},
+}
+
+_geos_transformers: dict[str, Transformer] = {}
+
+
+def _geos_transformer(satellite: str) -> Transformer | None:
+    info = _GEOS_AREA_CONUS.get(satellite)
+    if info is None:
+        return None
+    if satellite not in _geos_transformers:
+        crs = CRS.from_dict({
+            "proj": "geos", "sweep": "x", "lon_0": info["lon_0"], "h": 35786023,
+            "x_0": 0, "y_0": 0, "ellps": "GRS80", "units": "m",
+        })
+        _geos_transformers[satellite] = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+    return _geos_transformers[satellite]
+
+
+def lonlat_to_pixels(
+    satellite: str, lons: np.ndarray, lats: np.ndarray, img_w: int, img_h: int
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Vectorized lon/lat -> (col, row) in a CONUS frame at img_w x img_h, for
+    whichever resolution tier was actually fetched (fraction-of-extent based, not
+    tied to a specific pixel count). Returns None for satellites without CONUS
+    calibration data (see _GEOS_AREA_CONUS)."""
+    t = _geos_transformer(satellite)
+    if t is None:
+        return None
+    x, y = t.transform(lons, lats)
+    x0, y0, x1, y1 = _GEOS_AREA_CONUS[satellite]["extent"]
+    col = (x - x0) / (x1 - x0) * img_w
+    row = (y1 - y) / (y1 - y0) * img_h
+    return col, row
+
+
+def draw_graticule(img: Image.Image, satellite: str, step_deg: float, color: tuple[int, int, int], opacity: int) -> Image.Image:
+    """Draw a lat/lon grid on img (must be the raw, untrimmed/uncropped CONUS frame —
+    see the pipeline-order note on overlay_* config fields)."""
+    w, h = img.size
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    fill = (*color, opacity)
+    line_width = max(1, round(w / 2000))  # a 1px line is invisible at 5000x3000+
+
+    def draw_run(cols: np.ndarray, rows: np.ndarray) -> None:
+        run: list[tuple[float, float]] = []
+        for c, r in zip(cols, rows):
+            if 0 <= c <= w and 0 <= r <= h and np.isfinite(c) and np.isfinite(r):
+                run.append((float(c), float(r)))
+            else:
+                if len(run) > 1:
+                    draw.line(run, fill=fill, width=line_width)
+                run = []
+        if len(run) > 1:
+            draw.line(run, fill=fill, width=line_width)
+
+    lon_samples = np.arange(-180, 180.01, 0.5)
+    lat_samples = np.arange(-85, 85.01, 0.5)
+    for lat in np.arange(-80, 80.01, step_deg):
+        result = lonlat_to_pixels(satellite, lon_samples, np.full_like(lon_samples, lat), w, h)
+        if result:
+            draw_run(*result)
+    for lon in np.arange(-180, 180.01, step_deg):
+        result = lonlat_to_pixels(satellite, np.full_like(lat_samples, lon), lat_samples, w, h)
+        if result:
+            draw_run(*result)
+
+    base = img.convert("RGBA")
+    base.alpha_composite(overlay)
+    return base.convert("RGB")
+
+
+def draw_city_markers(img: Image.Image, satellite: str, cities: tuple[CityMarker, ...], cfg: Config) -> Image.Image:
+    """Draw labeled markers at each city's projected pixel position. Same
+    raw-frame-only requirement as draw_graticule."""
+    if not cities:
+        return img
+    w, h = img.size
+    lons = np.array([c.lon for c in cities])
+    lats = np.array([c.lat for c in cities])
+    result = lonlat_to_pixels(satellite, lons, lats, w, h)
+    if result is None:
+        return img
+    cols, rows = result
+
+    scale = max(1.0, w / 2000)  # base sizes below are tuned for a ~2000px-wide frame
+    img = img.convert("RGB")
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype(cfg.info_font_path, round(cfg.overlay_city_font_size * scale))
+    except OSError:
+        font = ImageFont.load_default()
+
+    r = cfg.overlay_city_marker_radius * scale
+    color = cfg.overlay_city_color
+    for city, c, row in zip(cities, cols, rows):
+        if not (0 <= c <= w and 0 <= row <= h and np.isfinite(c) and np.isfinite(row)):
+            continue
+        draw.ellipse((c - r, row - r, c + r, row + r), outline=color, width=max(1, round(2 * scale)))
+        draw.text((c + r + 4, row), city.name, font=font, fill=color)
+    return img
+
+
+def draw_overlays(img: Image.Image, cfg: Config, source: EffectiveSource) -> Image.Image:
+    """Apply configured georeferenced overlays. Must run on the raw fetched frame,
+    before trim_source_caption/crop_fractional/crop_to_screen — those change the pixel
+    grid the calibration above assumes."""
+    if not (cfg.overlay_graticule or cfg.overlay_cities):
+        return img
+    if source.sector != "CONUS":
+        logging.warning(
+            "[%s] Georeferenced overlays are only calibrated for CONUS (sector=%s); skipping",
+            source.name, source.sector,
+        )
+        return img
+    if source.satellite not in _GEOS_AREA_CONUS:
+        logging.warning(
+            "[%s] No overlay calibration for satellite=%s; skipping", source.name, source.satellite,
+        )
+        return img
+
+    if cfg.overlay_graticule:
+        img = draw_graticule(img, source.satellite, cfg.overlay_graticule_step_deg, cfg.overlay_graticule_color, cfg.overlay_graticule_opacity)
+    if cfg.overlay_cities:
+        img = draw_city_markers(img, source.satellite, cfg.overlay_cities, cfg)
+    return img
+
+
+# --------------------------------------------------------------------------- #
+# Metadata
+# --------------------------------------------------------------------------- #
+
+def build_metadata(source: EffectiveSource, headers: dict[str, str], img: Image.Image) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    last_modified = headers.get("last-modified")
+    capture_time = parse_capture_time(headers)
+
+    return {
+        "combo": source.name,
+        "satellite": source.satellite,
+        "satellite_label": source.satellite_label(),
+        "sector": source.sector,
+        "sector_label": source.sector_label(),
+        "product": source.product,
+        "resolution_requested": source.resolution,
+        "source_url": source.image_url,
+        "downloaded_at_utc": now.isoformat(),
+        "capture_time_utc": capture_time,
+        "http_last_modified": last_modified,
+        "http_etag": headers.get("etag"),
+        "http_content_length": headers.get("content-length"),
+        "image_dimensions": list(img.size),
+        "image_format": img.format,
+    }
+
+
+def embed_exif(img: Image.Image, meta: dict[str, Any]) -> Image.Image:
+    """Bake key metadata into standard JPEG EXIF tags so it travels with the file."""
+    exif = img.getexif()
+    ImageDescription, Software, DateTimeOriginal, Artist = 0x010E, 0x0131, 0x9003, 0x013B
+
+    description = (
+        f"{meta['satellite_label']} {meta['sector_label']} {meta['product']} "
+        f"captured {meta['capture_time_utc'] or 'unknown'}"
+    )
+    exif[ImageDescription] = description
+    exif[Software] = "goes_wallpaper"
+    exif[Artist] = "NOAA STAR / NESDIS"
+    if meta["capture_time_utc"]:
+        try:
+            dt = datetime.fromisoformat(meta["capture_time_utc"])
+            exif[DateTimeOriginal] = dt.strftime("%Y:%m:%d %H:%M:%S")
+        except ValueError:
+            pass
+
+    img.info["exif"] = exif.tobytes()
+    return img
+
+
+def draw_info_block(img: Image.Image, cfg: Config, meta: dict[str, Any], platform: WallpaperPlatform) -> Image.Image:
+    img = img.convert("RGB")
+    width, height = img.size
+    bar_height = max(28, round(height * cfg.info_block_height_frac))
+    bottom_margin = platform.get_taskbar_height() if cfg.avoid_taskbar else 0
+
+    overlay = Image.new("RGBA", (width, bar_height), (0, 0, 0, cfg.info_block_opacity))
+    draw = ImageDraw.Draw(overlay)
+
+    try:
+        font_size = max(12, round(bar_height * 0.42))
+        font = ImageFont.truetype(cfg.info_font_path, font_size)
+    except OSError:
+        font = ImageFont.load_default()
+
+    capture_local = "unknown"
+    if meta["capture_time_utc"]:
+        dt_utc = datetime.fromisoformat(meta["capture_time_utc"])
+        capture_local = dt_utc.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+
+    left_text = f"{meta['satellite_label']}  •  {meta['sector_label']}  •  {meta['product']}"
+    right_text = f"Captured {capture_local}"
+
+    pad = round(bar_height * 0.25)
+    draw.text((pad, bar_height // 2), left_text, font=font, fill=(255, 255, 255, 255), anchor="lm")
+    draw.text((width - pad, bar_height // 2), right_text, font=font, fill=(255, 255, 255, 255), anchor="rm")
+
+    base = img.convert("RGBA")
+    base.alpha_composite(overlay, (0, height - bar_height - bottom_margin))
+    return base.convert("RGB")
+
+
+
+# --------------------------------------------------------------------------- #
+# Capture-time-aware scheduling
+# --------------------------------------------------------------------------- #
+
+def update_capture_phase(cfg: Config, state: dict[str, Any], capture_time_iso: str) -> None:
+    """Track *when within each interval* fresh frames tend to actually post (e.g. ~40s
+    after each 5-minute boundary), so the loop can wake up shortly after that instead
+    of guessing at the raw clock boundary. Uses a circular EMA since the phase wraps
+    around at the interval boundary (e.g. 359s and 2s are only 3s apart, not 357s)."""
+    interval = cfg.interval_minutes * 60
+    phase = datetime.fromisoformat(capture_time_iso).timestamp() % interval
+
+    prior = state.get("capture_phase_seconds")
+    prior_interval = state.get("capture_phase_interval_minutes")
+    if prior is None or prior_interval != cfg.interval_minutes:
+        new_phase = phase
+    else:
+        diff = ((phase - prior + interval / 2) % interval) - interval / 2
+        new_phase = (prior + 0.3 * diff) % interval
+
+    state["capture_phase_seconds"] = new_phase
+    state["capture_phase_interval_minutes"] = cfg.interval_minutes
+
+
+def compute_next_run(cfg: Config, state: dict[str, Any], now: float) -> float:
+    interval = cfg.interval_minutes * 60
+    if not cfg.align_to_clock:
+        return now + interval
+
+    phase = state.get("capture_phase_seconds")
+    if not cfg.sync_to_capture_time or phase is None or state.get("capture_phase_interval_minutes") != cfg.interval_minutes:
+        return (now // interval + 1) * interval
+
+    next_run = (now // interval) * interval + phase + cfg.capture_offset_buffer_seconds
+    while next_run <= now:
+        next_run += interval
+    return next_run
+
+
+def maybe_wait_for_sync(cfg: Config, state: dict[str, Any], source: EffectiveSource) -> None:
+    """See wait_for_sync_time's docstring on Config: sleep once (this cycle, this
+    source) until shortly after the next frame should land, rather than fetching
+    immediately. A no-op if disabled, if this source's phase hasn't been learned yet,
+    or if the target has already passed."""
+    if not cfg.wait_for_sync_time:
+        return
+    sstate = state.get("sources", {}).get(source.key, {})
+    phase = sstate.get("capture_phase_seconds")
+    if phase is None or sstate.get("capture_phase_interval_minutes") != cfg.interval_minutes:
+        return
+
+    interval = cfg.interval_minutes * 60
+    now = time.time()
+    target = (now // interval) * interval + phase + cfg.capture_offset_buffer_seconds
+    wait = target - now
+    if wait <= 0:
+        return
+    if wait > cfg.wait_for_sync_max_seconds:
+        logging.info(
+            "[%s] Computed presync wait %.0fs exceeds wait_for_sync_max_seconds (%.0fs); fetching now instead",
+            source.name, wait, cfg.wait_for_sync_max_seconds,
+        )
+        return
+
+    logging.info("[%s] Waiting %.0fs for the next frame's likely publish time before fetching", source.name, wait)
+    time.sleep(wait)
+
+
+# --------------------------------------------------------------------------- #
+# Power/network-aware fallbacks
+# --------------------------------------------------------------------------- #
+
+def should_skip_for_power(cfg: Config, platform: WallpaperPlatform) -> bool:
+    """See skip_on_battery's docstring on Config. Unknown battery state (can't be
+    detected on this platform/hardware) is treated as "not on battery" — never skips
+    on a guess."""
+    if not cfg.skip_on_battery:
+        return False
+    power = platform.get_power_state()
+    if power.on_battery:
+        logging.info(
+            "Skipping cycle: running on battery power (skip_on_battery=true, %s%% remaining)",
+            power.battery_percent if power.battery_percent is not None else "unknown",
+        )
+        return True
+    return False
+
+
+def maybe_apply_metered_resolution(cfg: Config, source: EffectiveSource, platform: WallpaperPlatform) -> EffectiveSource:
+    """See metered_resolution's docstring on Config. Unknown network-cost state
+    (can't be detected on this platform/hardware) is treated as "not metered" — never
+    downgrades resolution on a guess."""
+    if not cfg.metered_resolution or cfg.metered_resolution == source.resolution:
+        return source
+    if platform.is_network_metered():
+        logging.info(
+            "[%s] Network is metered; using %s instead of %s this cycle",
+            source.name, cfg.metered_resolution, source.resolution,
+        )
+        return replace(source, resolution=cfg.metered_resolution)
+    return source
+
+
+# --------------------------------------------------------------------------- #
+# Core run
+# --------------------------------------------------------------------------- #
+
+def fetch_and_render(
+    cfg: Config,
+    session: requests.Session,
+    source: EffectiveSource,
+    state: dict[str, Any],
+    screen_size: tuple[int, int],
+    platform: WallpaperPlatform,
+) -> tuple[Image.Image, dict[str, Any]] | None:
+    """Fetch (with freshness retry), decode, and fully render one EffectiveSource's
+    frame into a screen_size-sized final image + its metadata. Updates state in place
+    (per-source ETag/capture-time/learned publish phase, keyed by source.key so
+    unrelated sources sharing one config never mix up each other's freshness
+    tracking). Returns None if the source genuinely hasn't changed (304)."""
+    source = maybe_apply_metered_resolution(cfg, source, platform)
+    sstate = state.setdefault("sources", {}).setdefault(source.key, {})
+    prev_etag = sstate.get("etag") if cfg.skip_if_unchanged else None
+    prev_capture_time = sstate.get("last_capture_time_utc")
+
+    started = time.monotonic()
+    result = fetch_fresh_image(
+        cfg, session, source.image_url, prev_etag, prev_capture_time,
+        started + cfg.max_fresh_wait_seconds,
+    )
+    elapsed = time.monotonic() - started
+
+    if result is None:
+        logging.info("[%s] No new image available", source.name)
+        return None
+
+    content, headers = result
+    logging.info("[%s] Downloaded %d bytes in %.2fs", source.name, len(content), elapsed)
+
+    with Image.open(io.BytesIO(content)) as img:
+        img.load()
+        meta = build_metadata(source, headers, img)
+
+        img = draw_overlays(img, cfg, source)
+
+        if cfg.trim_source_caption:
+            img = trim_source_caption(img, cfg.trim_source_caption_frac)
+
+        img = crop_fractional(img, source.crop_left, source.crop_top, source.crop_right, source.crop_bottom)
+
+        if cfg.crop_to_screen:
+            img = crop_to_screen(img, screen_size, cfg.crop_anchor)
+            meta["screen_size"] = list(screen_size)
+            logging.info("[%s] Cropped to %s", source.name, screen_size)
+
+        if cfg.info_block:
+            img = draw_info_block(img, cfg, meta, platform)
+
+        img = embed_exif(img, meta)
+
+    sstate["etag"] = headers.get("etag")
+    if meta["capture_time_utc"]:
+        if meta["capture_time_utc"] != prev_capture_time:
+            update_capture_phase(cfg, sstate, meta["capture_time_utc"])
+        sstate["last_capture_time_utc"] = meta["capture_time_utc"]
+
+    return img, meta
+
+
+def run_once(cfg: Config, session: requests.Session, platform: WallpaperPlatform) -> bool:
+    """combo_mode = "single": fetch-crop-annotate-apply the one top-level configured
+    source. Returns True if the wallpaper changed."""
+    if should_skip_for_power(cfg, platform):
+        return False
+
+    state = load_state(cfg)
+    source = resolve_source(cfg, None)
+    state["last_source_key"] = source.key
+    maybe_wait_for_sync(cfg, state, source)
+
+    screen_size = platform.get_screen_size(cfg.span_all_monitors, cfg.screen_width, cfg.screen_height, cfg.wmi_screen_size_fallback) if cfg.crop_to_screen else (0, 0)
+    result = fetch_and_render(cfg, session, source, state, screen_size, platform)
+    if result is None:
+        logging.info("Leaving current wallpaper in place")
+        save_state(cfg, state)
+        return False
+    img, meta = result
+
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    img.save(cfg.wallpaper_path, "JPEG", quality=92, exif=img.info.get("exif", b""))
+    cfg.metadata_path.write_text(json.dumps(meta, indent=2))
+    logging.info("Saved wallpaper + metadata to %s", cfg.data_dir)
+
+    platform.apply_wallpaper(cfg.wallpaper_path, cfg.wallpaper_style)
+    logging.info("Wallpaper applied (style=%s)", cfg.wallpaper_style)
+
+    state["last_applied_utc"] = datetime.now(timezone.utc).isoformat()
+    save_state(cfg, state)
+    return True
+
+
+def run_once_rotate(cfg: Config, session: requests.Session, platform: WallpaperPlatform) -> bool:
+    """combo_mode = "rotate": cycle through cfg.combos one per cycle (index persisted
+    in state.json), applied as a single wallpaper just like "single" mode."""
+    if not cfg.combos:
+        raise ValueError('combo_mode = "rotate" requires at least one [[combos]] entry')
+    if should_skip_for_power(cfg, platform):
+        return False
+
+    state = load_state(cfg)
+    index = state.get("combo_rotation_index", 0) % len(cfg.combos)
+    combo = cfg.combos[index]
+    source = resolve_source(cfg, combo)
+    state["last_source_key"] = source.key
+    maybe_wait_for_sync(cfg, state, source)
+
+    screen_size = platform.get_screen_size(cfg.span_all_monitors, cfg.screen_width, cfg.screen_height, cfg.wmi_screen_size_fallback) if cfg.crop_to_screen else (0, 0)
+    result = fetch_and_render(cfg, session, source, state, screen_size, platform)
+    if result is None:
+        logging.info("[%s] Leaving current wallpaper in place", combo.name)
+        save_state(cfg, state)
+        return False
+    img, meta = result
+
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    img.save(cfg.wallpaper_path, "JPEG", quality=92, exif=img.info.get("exif", b""))
+    cfg.metadata_path.write_text(json.dumps(meta, indent=2))
+    logging.info("[%s] Saved wallpaper + metadata to %s", combo.name, cfg.data_dir)
+
+    platform.apply_wallpaper(cfg.wallpaper_path, cfg.wallpaper_style)
+    logging.info("[%s] Wallpaper applied (style=%s)", combo.name, cfg.wallpaper_style)
+
+    state["combo_rotation_index"] = (index + 1) % len(cfg.combos)
+    state["last_applied_utc"] = datetime.now(timezone.utc).isoformat()
+    save_state(cfg, state)
+    return True
+
+
+def run_once_per_monitor(cfg: Config, session: requests.Session, platform: WallpaperPlatform) -> bool:
+    """combo_mode = "per_monitor": each combo's `monitor` index gets its own
+    independently rendered+applied wallpaper. Monitors with no assigned combo are
+    left untouched. Returns True if any monitor was updated."""
+    if not cfg.combos:
+        raise ValueError('combo_mode = "per_monitor" requires at least one [[combos]] entry')
+    if should_skip_for_power(cfg, platform):
+        return False
+
+    state = load_state(cfg)
+    by_monitor = {combo.monitor: combo for combo in cfg.combos if combo.monitor is not None}
+
+    monitors = platform.list_monitors()
+    logging.info("Found %d active monitor(s)", len(monitors))
+
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    assignments: dict[str, Path] = {}
+    for i, monitor in enumerate(monitors):
+        combo = by_monitor.get(i)
+        if combo is None:
+            logging.info("Monitor %d has no assigned combo; leaving it untouched", i)
+            continue
+
+        source = resolve_source(cfg, combo)
+        result = fetch_and_render(cfg, session, source, state, (monitor.width, monitor.height), platform)
+        if result is None:
+            logging.info("[%s] Leaving monitor %d's wallpaper in place", combo.name, i)
+            continue
+        img, meta = result
+
+        out_path = cfg.data_dir / f"wallpaper_monitor{i}.jpg"
+        img.save(out_path, "JPEG", quality=92, exif=img.info.get("exif", b""))
+        (cfg.data_dir / f"wallpaper_monitor{i}.json").write_text(json.dumps(meta, indent=2))
+        assignments[monitor.id] = out_path
+        logging.info("[%s] Rendered for monitor %d (%s)", combo.name, i, monitor.id)
+
+    if assignments:
+        platform.apply_wallpaper_per_monitor(assignments, cfg.wallpaper_style)
+        for i, monitor in enumerate(monitors):
+            if monitor.id in assignments:
+                logging.info("Applied to monitor %d (%s)", i, monitor.id)
+        state["last_applied_utc"] = datetime.now(timezone.utc).isoformat()
+
+    save_state(cfg, state)
+    return bool(assignments)
+
+
+_CYCLE_FUNCS = {
+    "single": run_once,
+    "rotate": run_once_rotate,
+    "per_monitor": run_once_per_monitor,
+}
+
+
+def run_loop(cfg: Config, session: requests.Session, platform: WallpaperPlatform) -> None:
+    """Run indefinitely, waking on drift-corrected boundaries instead of naive sleep(),
+    so the effective cadence doesn't creep as each cycle's own runtime accumulates.
+    When sync_to_capture_time is enabled, the boundary itself is nudged to line up
+    with when fresh frames actually post rather than the raw clock tick — driven by
+    whichever source state["last_source_key"] points at (unset in "per_monitor" mode,
+    since multiple sources are fetched per cycle there; falls back to plain
+    clock-boundary alignment in that case)."""
+    cycle = _CYCLE_FUNCS[cfg.combo_mode]
+    while True:
+        try:
+            cycle(cfg, session, platform)
+        except Exception:
+            logging.exception("Cycle failed; will retry next interval")
+
+        state = load_state(cfg)
+        now = time.time()
+        key = state.get("last_source_key")
+        sstate = state.get("sources", {}).get(key, {}) if key else {}
+        next_run = compute_next_run(cfg, sstate, now)
+        next_run += cfg.jitter_seconds * (0.5 - _rand_unit())
+
+        sleep_for = max(1.0, next_run - time.time())
+        logging.info("Sleeping %.1fs until next cycle", sleep_for)
+        time.sleep(sleep_for)
+
+
+def _rand_unit() -> float:
+    return random.random()
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Path to a TOML config file")
+    p.add_argument("--satellite", help="e.g. GOES19, GOES18")
+    p.add_argument("--sector", help="e.g. CONUS, FD, M1, M2")
+    p.add_argument("--product", help="e.g. GEOCOLOR")
+    p.add_argument("--resolution", help='e.g. "2500x1500" or "latest"')
+    p.add_argument("--data-dir", type=Path, dest="data_dir")
+    p.add_argument("--wallpaper-style", choices=list(WALLPAPER_STYLE_NAMES), dest="wallpaper_style")
+    p.add_argument("--no-crop", action="store_const", const=False, dest="crop_to_screen")
+    p.add_argument("--no-info-block", action="store_const", const=False, dest="info_block")
+    p.add_argument("--span-all-monitors", action="store_const", const=True, dest="span_all_monitors")
+    p.add_argument("--loop", action="store_const", const=True, dest="loop")
+    p.add_argument(
+        "--wait-for-sync", action="store_const", const=True, dest="wait_for_sync_time",
+        help="Single-shot/Task Scheduler use: sleep until shortly after the next frame's "
+             "learned publish time before fetching, instead of fetching immediately.",
+    )
+    p.add_argument("--interval-minutes", type=int, dest="interval_minutes")
+    p.add_argument("--log-level", dest="log_level")
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+    overrides = {
+        k: v for k, v in vars(args).items() if k != "config"
+    }
+    cfg = load_config(args.config, overrides)
+    validate_combos(cfg)
+    setup_logging(cfg)
+
+    platform = get_platform()
+    session = build_session(cfg)
+    try:
+        if cfg.loop:
+            run_loop(cfg, session, platform)
+        else:
+            _CYCLE_FUNCS[cfg.combo_mode](cfg, session, platform)
+    except Exception:
+        logging.exception("Unhandled exception while running goes_wallpaper")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

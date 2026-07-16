@@ -1,0 +1,174 @@
+# Example configuration for goes_wallpaper.py
+# Copy/edit this file (or pass --config path/to/other.toml) to change behavior
+# without touching the script. Any key omitted here falls back to the script's
+# built-in default; any CLI flag passed at runtime overrides both.
+
+# --- Source image ---
+satellite = "GOES19"      # GOES19 (East) or GOES18 (West)
+sector = "CONUS"          # CONUS | FD (Full Disk) | M1 | M2 (Mesoscale)
+product = "GEOCOLOR"
+# NOAA serves discrete sizes per sector, not an arbitrary resize. Verified for CONUS:
+# 625x375, 1250x750, 2500x1500, 5000x3000, 10000x6000 (native ABI band-2 resolution).
+# 5000x3000 comfortably covers a 4K (3840x2160) monitor even after a full-frame crop;
+# bump to 10000x6000 if you crop aggressively (source_crop_*/combo crop_*) and want
+# more headroom — at the cost of a much bigger download every cycle. Full Disk's tiers
+# differ (verified: 1808x1808, 5424x5424, 10848x10848); Mesoscale untested.
+resolution = "5000x3000"
+
+# --- Output ---
+# data_dir = "C:/Users/you/AppData/Local/GOES-Wallpaper"  # defaults to that path already
+wallpaper_style = "fill"  # fill | fit | stretch | tile | center | span
+
+# --- Screen handling ---
+crop_to_screen = true
+crop_anchor = 0.5         # 0.0 top/left .. 1.0 bottom/right bias when cropping
+# screen_width = 1920      # uncomment to override auto-detected resolution
+# screen_height = 1080
+span_all_monitors = false # crop to the full virtual desktop instead of just the
+                           # primary monitor; pair with wallpaper_style = "span"
+
+# GetSystemMetrics reports a fake 1024x768 when the process has no interactive
+# desktop (e.g. a "run whether user is logged on or not" scheduled task). WMI reads
+# the video driver's current mode directly and isn't affected by that, so it's tried
+# automatically before falling back to 1024x768. Only applies when span_all_monitors
+# is false — spanning still needs an explicit screen_width/screen_height in that case.
+wmi_screen_size_fallback = true
+
+# NOAA bakes its own timestamp/caption strip into the bottom of the source image;
+# trim it off before our crop/info-block overlay so it isn't half-cut or duplicated.
+trim_source_caption = true
+trim_source_caption_frac = 0.02
+
+# Region-of-interest crop applied *before* the screen-fit cover-crop above, as
+# fractions (0.0-1.0) of the caption-trimmed source image. Defaults to the full frame.
+# Lets you frame a sub-region deliberately instead of the cover-crop's resize+crop
+# discarding it unpredictably, and can trim off NOAA's logo watermark (bottom-left
+# corner of every frame on this CDN). Note: it can only cut edges — it can't remove
+# things baked in across the whole frame, like the state/country border lines NOAA
+# overlays on every product (GEOCOLOR and the raw bands alike).
+source_crop_left = 0.0
+source_crop_top = 0.0
+source_crop_right = 1.0
+source_crop_bottom = 1.0
+
+# --- Georeferenced overlays (optional, CONUS only) ---
+# Drawn on the raw fetched frame, before any of our own trim/crop/resize. Adds to,
+# doesn't replace, NOAA's own baked-in state lines (source_crop_* above explains why
+# those can't be removed). Only calibrated for CONUS on GOES18/GOES19 — Full Disk and
+# Mesoscale aren't supported (Mesoscale's extent moves, so it can't be hardcoded).
+overlay_graticule = false          # lat/lon grid lines
+overlay_graticule_step_deg = 10.0
+overlay_graticule_color = [255, 255, 0]
+overlay_graticule_opacity = 110    # 0-255
+overlay_city_marker_radius = 5     # base size at ~2000px width; scales up with resolution
+overlay_city_color = [255, 60, 60]
+overlay_city_font_size = 18        # base size at ~2000px width; scales up with resolution
+
+# Example labeled city markers:
+# [[overlay_cities]]
+# name = "San Francisco"
+# lon = -122.42
+# lat = 37.77
+#
+# [[overlay_cities]]
+# name = "Denver"
+# lon = -104.99
+# lat = 39.74
+
+# --- Multi-source combos (optional) ---
+# Define named source+crop presets and how to use them. Ignored entirely unless
+# combo_mode is set below. Any field left unset on a combo falls back to the
+# top-level satellite/sector/product/resolution above; crop_left/top/right/bottom
+# always apply (default: no crop, same as source_crop_* above).
+#
+# combo_mode:
+#   "single"      (default) - combos below are ignored.
+#   "rotate"      - cycle through combos one per cycle (state.json remembers where it
+#                   left off), applied as a single wallpaper like "single" mode.
+#   "per_monitor" - each combo's `monitor` (0-based, in the order Windows'
+#                   IDesktopWallpaper enumerates monitors — not necessarily the same
+#                   numbering as Display Settings) gets its own independently
+#                   rendered+applied wallpaper. Every combo must set `monitor` in this
+#                   mode, and each monitor with no assigned combo is left untouched.
+#                   Monitors are fetched sequentially, so total cycle time scales with
+#                   how many distinct combos are assigned.
+combo_mode = "single"
+
+# Example: rotate between GEOCOLOR and Clean IR on a single monitor.
+# [[combos]]
+# name = "geocolor"
+# product = "GEOCOLOR"
+#
+# [[combos]]
+# name = "clean_ir"
+# product = "13"
+
+# Example: a different source per monitor (requires combo_mode = "per_monitor").
+# [[combos]]
+# name = "primary_geocolor"
+# product = "GEOCOLOR"
+# monitor = 0
+#
+# [[combos]]
+# name = "secondary_westcoast_zoom"
+# satellite = "GOES18"
+# crop_left = 0.5
+# monitor = 1
+
+# --- Info block overlay ---
+info_block = true
+info_block_height_frac = 0.055
+info_block_opacity = 160
+# The wallpaper renders full-screen behind the taskbar, so a bar drawn at the very
+# bottom edge gets clipped by it. avoid_taskbar nudges the bar up by the taskbar's
+# actual live height (queried at render time) instead of a guessed constant.
+avoid_taskbar = true
+
+# --- Networking / retries ---
+timeout_connect = 10.0
+timeout_read = 30.0
+max_retries = 5
+backoff_factor = 1.5
+
+# --- Scheduling (only used with --loop) ---
+loop = false
+interval_minutes = 5
+align_to_clock = true
+jitter_seconds = 3.0
+
+# NOAA doesn't publish a new frame right on the clock boundary — there's a
+# processing/CDN lag (typically tens of seconds). sync_to_capture_time learns that lag
+# from each frame's actual capture time and schedules the next wake-up shortly after,
+# instead of guessing at the raw boundary and often re-downloading the previous frame.
+sync_to_capture_time = true
+capture_offset_buffer_seconds = 20.0
+# wait_for_fresh_capture retries within a single cycle (every fresh_retry_interval_seconds,
+# up to max_fresh_wait_seconds total) if the download comes back with the same capture
+# time as last cycle — i.e. the new frame just hasn't posted yet.
+wait_for_fresh_capture = true
+fresh_retry_interval_seconds = 15.0
+max_fresh_wait_seconds = 90.0
+
+# For Task Scheduler-style single-shot use (no --loop): if the trigger fires right at
+# (or shortly before) the clock boundary and this source's publish phase has already
+# been learned from a prior run, sleep once until shortly after the next frame should
+# land instead of fetching immediately and relying on wait_for_fresh_capture's
+# poll-and-retry above. No-op until a phase has been learned (first run after
+# switching this on just fetches immediately, same as before). Capped by
+# wait_for_sync_max_seconds so a Task Scheduler interval that doesn't match
+# interval_minutes can't hang the task for most of a cycle. Also settable via
+# --wait-for-sync. Harmless (near-zero wait) with --loop too, since run_loop's own
+# inter-cycle scheduling already lands wake-ups at this same target.
+wait_for_sync_time = false
+wait_for_sync_max_seconds = 150.0
+
+# --- Power/network-aware fallbacks (optional) ---
+# Both go through the platform backend, which degrades to "unknown" gracefully on
+# hardware/platforms that can't detect this — unknown is always treated as "not
+# constrained," never as a guess to skip/downgrade on. Both off by default.
+skip_on_battery = false        # skip the whole cycle if running on battery power
+# metered_resolution = "1250x750"  # override `resolution` when the network is metered
+
+# --- Misc ---
+skip_if_unchanged = true
+log_level = "INFO"

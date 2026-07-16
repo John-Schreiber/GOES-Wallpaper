@@ -1,0 +1,50 @@
+name: CI
+
+"on":
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-latest is the real target (comtypes/winrt backend, live entry-point
+        # smoke test below). ubuntu-latest is included deliberately: goes_wallpaper.py
+        # and platform_base.py have no OS-specific imports at module level (only
+        # platform_windows.py does, loaded lazily inside get_platform() when actually
+        # called), and the test suite exercises platform-dependent logic through the
+        # FakePlatform stub rather than a real backend -- so the whole suite should
+        # pass on Linux too. If it stops passing there, that's a real signal the
+        # cross-platform boundary leaked something OS-specific outside
+        # platform_windows.py.
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run tests
+        run: uv run pytest -v
+
+      - name: Verify the package builds
+        run: uv build
+
+      - name: Install the built wheel and smoke-test the entry points
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $wheel = Get-Item dist\*.whl
+          uv venv smoke-test-venv
+          uv pip install --python smoke-test-venv $wheel
+          & smoke-test-venv\Scripts\goes-wallpaper.exe --help
