@@ -2,6 +2,12 @@
 # Copy/edit this file (or pass --config path/to/other.toml) to change behavior
 # without touching the script. Any key omitted here falls back to the script's
 # built-in default; any CLI flag passed at runtime overrides both.
+#
+# Note on section order: TOML array-of-tables ([[...]]) headers, like [[combos]] and
+# [[overlay_cities]] below, swallow every plain `key = value` line that follows them
+# until the next table header. To avoid that footgun, every array-of-tables section in
+# this file is placed at the very end, after all the plain scalar settings — keep new
+# scalar settings above them, not between them.
 
 # --- Source image ---
 satellite = "GOES19"      # GOES19 (East) or GOES18 (West)
@@ -63,17 +69,8 @@ overlay_graticule_opacity = 110    # 0-255
 overlay_city_marker_radius = 5     # base size at ~2000px width; scales up with resolution
 overlay_city_color = [255, 60, 60]
 overlay_city_font_size = 18        # base size at ~2000px width; scales up with resolution
-
-# Example labeled city markers:
-# [[overlay_cities]]
-# name = "San Francisco"
-# lon = -122.42
-# lat = 37.77
-#
-# [[overlay_cities]]
-# name = "Denver"
-# lon = -104.99
-# lat = 39.74
+# Labeled city markers themselves are defined via [[overlay_cities]] at the end of
+# this file (see the note at the top about array-of-tables placement).
 
 # --- Multi-source combos (optional) ---
 # Define named source+crop presets and how to use them. Ignored entirely unless
@@ -93,27 +90,8 @@ overlay_city_font_size = 18        # base size at ~2000px width; scales up with 
 #                   Monitors are fetched sequentially, so total cycle time scales with
 #                   how many distinct combos are assigned.
 combo_mode = "single"
-
-# Example: rotate between GEOCOLOR and Clean IR on a single monitor.
-# [[combos]]
-# name = "geocolor"
-# product = "GEOCOLOR"
-#
-# [[combos]]
-# name = "clean_ir"
-# product = "13"
-
-# Example: a different source per monitor (requires combo_mode = "per_monitor").
-# [[combos]]
-# name = "primary_geocolor"
-# product = "GEOCOLOR"
-# monitor = 0
-#
-# [[combos]]
-# name = "secondary_westcoast_zoom"
-# satellite = "GOES18"
-# crop_left = 0.5
-# monitor = 1
+# combos themselves (if combo_mode isn't "single") are defined via [[combos]] at the
+# end of this file, alongside [[overlay_cities]] -- see the note at the top.
 
 # --- Info block overlay ---
 info_block = true
@@ -172,3 +150,44 @@ skip_on_battery = false        # skip the whole cycle if running on battery powe
 # --- Misc ---
 skip_if_unchanged = true
 log_level = "INFO"
+
+# --- Multi-source combos (array-of-tables; must come after every scalar setting
+# above -- see the note at the top of this file) ---
+# Example: rotate between GEOCOLOR and Clean IR on a single monitor.
+# [[combos]]
+# name = "geocolor"
+# product = "GEOCOLOR"
+#
+# [[combos]]
+# name = "clean_ir"
+# product = "13"
+
+# Example: a different source per monitor (requires combo_mode = "per_monitor").
+# [[combos]]
+# name = "primary_geocolor"
+# product = "GEOCOLOR"
+# monitor = 0
+#
+# [[combos]]
+# name = "secondary_westcoast_zoom"
+# satellite = "GOES18"
+# crop_left = 0.5
+# monitor = 1
+
+# --- City markers (array-of-tables; must come after every scalar setting above --
+# see the note at the top of this file) ---
+[[overlay_cities]]
+name = "Portland, ME"
+lon = -70.2568
+lat = 43.6591
+
+# More examples:
+# [[overlay_cities]]
+# name = "San Francisco"
+# lon = -122.42
+# lat = 37.77
+#
+# [[overlay_cities]]
+# name = "Denver"
+# lon = -104.99
+# lat = 39.74

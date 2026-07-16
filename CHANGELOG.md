@@ -1,10 +1,8 @@
 # Changelog
 
-Format loosely follows [Keep a Changelog](https://keepachangelog.com/). Nothing below
-"Unreleased" has been tagged yet — `pyproject.toml` says `2.0.0`, but that's the
-in-progress version number, not a cut release.
+Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased] — full modernization
+## [2.0.0] — 2026-07-16 — full modernization
 
 A ground-up rewrite of the original single-file script. Highlights:
 
