@@ -40,6 +40,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import random
 import subprocess
 import sys
@@ -59,6 +60,14 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from platform_base import MonitorInfo, WallpaperPlatform, WALLPAPER_STYLE_NAMES, get_platform
+
+# Full Disk's largest published tier (10848x10848 = ~117.7M px) exceeds Pillow's
+# default MAX_IMAGE_PIXELS (~89.5M), which logs a DecompressionBombWarning on every
+# such fetch and would hard-error if Pillow's 2x safety threshold ever tightens.
+# Raised to a bounded value that comfortably covers every known NOAA tier -- not
+# disabled (None), since the guard is real protection against a compromised or
+# misbehaving CDN serving an oversized image.
+Image.MAX_IMAGE_PIXELS = 130_000_000
 
 # --------------------------------------------------------------------------- #
 # Configuration
@@ -146,6 +155,11 @@ class Config:
     source_kind: str = "cdn_jpg"
 
     # Output
+    # This class-level default is Windows-specific and only applies when Config is
+    # constructed directly (as most tests do). The real CLI entry point
+    # (goes_wallpaper.main) goes through load_config(..., platform=...), which
+    # prefers WallpaperPlatform.default_data_dir() instead -- see load_config's
+    # docstring.
     data_dir: Path = DEFAULT_DATA_DIR
     wallpaper_style: str = "fill"  # fill | fit | stretch | tile | center | span
     # If set, also save the rendered frame(s) here and skip applying them as the
@@ -254,6 +268,11 @@ class Config:
     info_block: bool = True
     info_block_height_frac: float = 0.055
     info_block_opacity: int = 160  # 0-255
+    # Same caveat as data_dir above: this Windows-specific default only applies when
+    # Config is constructed directly. load_config(..., platform=...) prefers
+    # WallpaperPlatform.default_font_path() instead. Either way, a path that can't
+    # be loaded degrades gracefully to Pillow's built-in default font (see
+    # draw_info_block/_fit_info_bar_font), never raises.
     info_font_path: str = r"C:\Windows\Fonts\segoeui.ttf"
     # The desktop wallpaper renders full-screen behind the taskbar, so a bar drawn at
     # the very bottom edge gets clipped by it. When enabled, the info bar is nudged up
@@ -337,8 +356,14 @@ class Config:
         return self.data_dir / "log.txt"
 
 
-def load_config(config_path: Path, overrides: dict[str, Any]) -> Config:
-    """Build a Config from an optional TOML file, then apply CLI overrides on top."""
+def load_config(config_path: Path, overrides: dict[str, Any], platform: WallpaperPlatform | None = None) -> Config:
+    """Build a Config from an optional TOML file, then apply CLI overrides on top.
+    `platform`, if given, supplies the data_dir/info_font_path defaults when neither
+    the TOML file nor overrides set them -- e.g. Windows' AppData layout means
+    nothing on a future Linux/macOS backend (see WallpaperPlatform.default_data_dir/
+    default_font_path). Left unset (as most tests do, constructing Config directly
+    or calling load_config without a platform), Config's own class-level defaults
+    apply, unchanged from before this existed."""
     values: dict[str, Any] = {}
     if config_path.exists():
         with config_path.open("rb") as f:
@@ -350,6 +375,10 @@ def load_config(config_path: Path, overrides: dict[str, Any]) -> Config:
         raise ValueError(f"Unknown config key(s) in {config_path}: {', '.join(sorted(unknown))}")
 
     values.update({k: v for k, v in overrides.items() if v is not None})
+
+    if platform is not None:
+        values.setdefault("data_dir", platform.default_data_dir())
+        values.setdefault("info_font_path", platform.default_font_path())
 
     if "data_dir" in values:
         values["data_dir"] = Path(values["data_dir"])
@@ -543,6 +572,15 @@ def build_session(cfg: Config) -> requests.Session:
     return session
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text to path via a same-directory temp file + os.replace, so a
+    crash/power loss mid-write can never leave a truncated/corrupted file behind --
+    the replace is a single filesystem-level rename, not a partial write in place."""
+    tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    tmp_path.write_text(text)
+    os.replace(tmp_path, path)
+
+
 def load_state(cfg: Config) -> dict[str, Any]:
     if cfg.state_path.exists():
         try:
@@ -553,7 +591,7 @@ def load_state(cfg: Config) -> dict[str, Any]:
 
 
 def save_state(cfg: Config, state: dict[str, Any]) -> None:
-    cfg.state_path.write_text(json.dumps(state, indent=2))
+    _atomic_write_text(cfg.state_path, json.dumps(state, indent=2))
 
 
 def fetch_image(cfg: Config, session: requests.Session, url: str, prev_etag: str | None) -> tuple[bytes, dict[str, str]] | None:
@@ -1123,7 +1161,7 @@ def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: Effecti
         try:
             cfg.data_dir.mkdir(parents=True, exist_ok=True)
             layer.save(cache_png)
-            cache_meta.write_text(json.dumps(key))
+            _atomic_write_text(cache_meta, json.dumps(key))
         except OSError as e:
             logging.warning("Couldn't write overlay_geojson_files cache: %s", e)
 
@@ -1264,6 +1302,29 @@ def embed_exif(img: Image.Image, meta: dict[str, Any]) -> Image.Image:
 # with padding (see font_size/pad below, which derive from bar_height).
 _INFO_BAR_MIN_HEIGHT_PX = 28
 
+# Floor for the shrink-to-fit loop below -- stop shrinking once the font would become
+# illegible rather than chasing an exact fit for pathologically long text.
+_INFO_BAR_MIN_FONT_PX = 10
+
+
+def _fit_info_bar_font(draw: ImageDraw.ImageDraw, left_text: str, right_text: str, font_path: str, font_size: int, available_width: int, pad: int) -> ImageFont.FreeTypeFont:
+    """Pick the largest font size (down to _INFO_BAR_MIN_FONT_PX) at which left_text and
+    right_text, drawn left- and right-aligned with `pad` on each end and between them,
+    don't overlap. A long product label (e.g. satpy_raw's "GeoColor (satpy_raw)") on a
+    square Full Disk frame can outrun the bar width at the nominal size otherwise."""
+    try:
+        font = ImageFont.truetype(font_path, font_size)
+    except OSError:
+        return ImageFont.load_default()
+
+    while font_size > _INFO_BAR_MIN_FONT_PX and draw.textlength(left_text, font=font) + draw.textlength(right_text, font=font) + 3 * pad > available_width:
+        font_size = round(font_size * 0.9)
+        try:
+            font = ImageFont.truetype(font_path, font_size)
+        except OSError:
+            return ImageFont.load_default()
+    return font
+
 
 def draw_info_block(img: Image.Image, cfg: Config, meta: dict[str, Any], platform: WallpaperPlatform) -> Image.Image:
     img = img.convert("RGB")
@@ -1274,12 +1335,6 @@ def draw_info_block(img: Image.Image, cfg: Config, meta: dict[str, Any], platfor
     overlay = Image.new("RGBA", (width, bar_height), (0, 0, 0, cfg.info_block_opacity))
     draw = ImageDraw.Draw(overlay)
 
-    try:
-        font_size = max(12, round(bar_height * 0.42))
-        font = ImageFont.truetype(cfg.info_font_path, font_size)
-    except OSError:
-        font = ImageFont.load_default()
-
     capture_local = "unknown"
     if meta["capture_time_utc"]:
         dt_utc = datetime.fromisoformat(meta["capture_time_utc"])
@@ -1289,6 +1344,9 @@ def draw_info_block(img: Image.Image, cfg: Config, meta: dict[str, Any], platfor
     right_text = f"Captured {capture_local}"
 
     pad = round(bar_height * 0.25)
+    font_size = max(12, round(bar_height * 0.42))
+    font = _fit_info_bar_font(draw, left_text, right_text, cfg.info_font_path, font_size, width, pad)
+
     draw.text((pad, bar_height // 2), left_text, font=font, fill=(255, 255, 255, 255), anchor="lm")
     draw.text((width - pad, bar_height // 2), right_text, font=font, fill=(255, 255, 255, 255), anchor="rm")
 
@@ -1558,7 +1616,7 @@ def run_once(cfg: Config, session: requests.Session, platform: WallpaperPlatform
 
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     img.save(cfg.wallpaper_path, "JPEG", quality=92, exif=img.info.get("exif", b""))
-    cfg.metadata_path.write_text(json.dumps(meta, indent=2))
+    _atomic_write_text(cfg.metadata_path, json.dumps(meta, indent=2))
     logging.info("Saved wallpaper + metadata to %s", cfg.data_dir)
 
     if cfg.render_to:
@@ -1597,7 +1655,7 @@ def run_once_rotate(cfg: Config, session: requests.Session, platform: WallpaperP
 
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     img.save(cfg.wallpaper_path, "JPEG", quality=92, exif=img.info.get("exif", b""))
-    cfg.metadata_path.write_text(json.dumps(meta, indent=2))
+    _atomic_write_text(cfg.metadata_path, json.dumps(meta, indent=2))
     logging.info("[%s] Saved wallpaper + metadata to %s", combo.name, cfg.data_dir)
 
     if cfg.render_to:
@@ -1644,7 +1702,7 @@ def run_once_per_monitor(cfg: Config, session: requests.Session, platform: Wallp
 
         out_path = cfg.data_dir / f"wallpaper_monitor{i}.jpg"
         img.save(out_path, "JPEG", quality=92, exif=img.info.get("exif", b""))
-        (cfg.data_dir / f"wallpaper_monitor{i}.json").write_text(json.dumps(meta, indent=2))
+        _atomic_write_text(cfg.data_dir / f"wallpaper_monitor{i}.json", json.dumps(meta, indent=2))
         assignments[monitor.id] = out_path
         logging.info("[%s] Rendered for monitor %d (%s)", combo.name, i, monitor.id)
 
@@ -1740,18 +1798,21 @@ def main(argv: list[str] | None = None) -> int:
     overrides = {
         k: v for k, v in vars(args).items() if k != "config"
     }
-    cfg = load_config(args.config, overrides)
+    platform = get_platform()
+    cfg = load_config(args.config, overrides, platform=platform)
     validate_combos(cfg)
     validate_source_kind(cfg)
     setup_logging(cfg)
 
-    platform = get_platform()
     session = build_session(cfg)
     try:
         if cfg.loop:
             run_loop(cfg, session, platform)
         else:
             _CYCLE_FUNCS[cfg.combo_mode](cfg, session, platform)
+    except KeyboardInterrupt:
+        logging.info("Interrupted, exiting")
+        return 130
     except Exception:
         logging.exception("Unhandled exception while running goes_wallpaper")
         return 1

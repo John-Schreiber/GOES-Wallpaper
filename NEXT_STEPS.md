@@ -11,6 +11,93 @@ raw satellite data — a separate, bigger initiative than anything below — see
 `source_kind = "satpy_raw"`) has landed; see that doc for what's done vs. still
 open.
 
+## Suggested order of attack (as of 2026-07-16)
+
+A recommended sequencing across the bug list and gap list below — not a commitment,
+just what looks highest-leverage first:
+
+1. **Bug 1 (satpy_raw disk leak)** — the only thing here that actively damages a
+   user's machine over time; small fix, ship it first.
+2. **Bugs 2–4** (side-docked taskbar, rotate-mode phase, atomic state writes) —
+   each is a small, self-contained correctness fix; could be one PR.
+3. **Gap 1 (long supervised `--loop` soak run)** — do this *after* the fixes above
+   so the soak validates them too (the disk leak would have been caught by exactly
+   this kind of run).
+4. **Gap 15 → gap 9** (unify the overlay style config shape, then the
+   `[[overlay_plugins]]` registry) — 15 is explicitly preparatory for 9, and 9
+   unblocks gap 16 (per-combo overlays); doing them in that order avoids building
+   the registry on three duplicated field families.
+5. **Gap 11 + gap 17 (Linux backend + data_dir portability)** — the biggest
+   audience-widener; 17 is a prerequisite discovered in this review (the default
+   `data_dir` hardcodes Windows' AppData layout in the supposedly cross-platform
+   core).
+6. Everything else (lock screen, frozen exe, geocoding, icons) as interest dictates.
+
+## Bug fixes needed (2026-07-16 full-repo review)
+
+Found by code review of `goes_wallpaper.py`/`source_satpy.py`/`platform_windows.py`
+(all 162 tests passing at the time). Ordered by severity:
+
+1. ~~**`satpy_raw` band files accumulate forever in `satpy_raw_cache` — disk
+   leak.**~~ Done: `fetch_composite` now deletes every file in `work_dir` that isn't
+   part of the current scan's selection before downloading it, so peak usage stays
+   at roughly one cycle's worth instead of growing forever. Regression-tested in
+   `tests/test_source_satpy.py`.
+2. **`avoid_taskbar` breaks for a side- or top-docked taskbar.**
+   `WindowsPlatform.get_taskbar_height()` returns the `Shell_TrayWnd` window rect's
+   *height* unconditionally. A left/right-docked taskbar's rect is the full screen
+   height, so the info bar gets nudged up by ~the whole screen and composites at a
+   negative y offset — verified Pillow 12 doesn't raise on that, it just renders the
+   bar off-image, so those users silently get **no info bar** (with `avoid_taskbar`
+   on by default). A top-docked taskbar nudges the bar up needlessly. Fix: use
+   `SHAppBarMessage(ABM_GETTASKBARPOS)` to get the taskbar *edge*, and only apply the
+   margin when it's docked at the bottom (return 0 otherwise).
+3. **`combo_mode = "rotate"` schedules the next wake-up from the wrong combo's
+   learned phase.** `run_loop` reads `state["last_source_key"]` — the combo *just
+   fetched* — but the next cycle fetches the *next* combo in the rotation, whose
+   publish phase (different satellite/sector/product) may differ. Fix: have rotate
+   mode record the upcoming combo's key (it already persists
+   `combo_rotation_index`), or compute the phase from that index in `run_loop`.
+4. ~~**`state.json`/`wallpaper.json` writes aren't atomic.**~~ Done: both, plus the
+   GeoJSON overlay cache sidecar, now go through a shared `_atomic_write_text`
+   (write to a same-directory temp file, then `os.replace`).
+5. ~~**Full Disk at `10848x10848` trips Pillow's decompression-bomb warning every
+   cycle.**~~ Done: `Image.MAX_IMAGE_PIXELS` is now raised to 130M at module load,
+   with a comment on why it's bounded rather than disabled.
+6. ~~**Ctrl-C in `--loop` exits with a raw traceback.**~~ Done: `main()` now catches
+   `KeyboardInterrupt` separately and exits with code 130 instead of a traceback.
+
+## Security notes (2026-07-16 review)
+
+No high-severity issues found. The trust model is sound: fetches are HTTPS with
+`requests`' default TLS verification, the CDN response is content-type-checked
+before decoding, `overlay_shell_command` is argv-only (no shell parsing), and the
+release workflow's permissions are minimal (`contents: write` only). Worth
+addressing or keeping in mind:
+
+- **`config.toml` is a code-execution surface by design** — `overlay_shell_command`
+  runs whatever argv the config specifies. That's the feature working as intended,
+  but it means `--config` must never be pointed at an untrusted file, and the config
+  shouldn't be writable by less-privileged users. Worth one sentence in the README's
+  overlay section saying exactly that.
+- **`_query_wmi_resolution` invokes `powershell` by bare name** (PATH lookup). In a
+  hostile-PATH scenario that's hijackable. Cheap hardening: invoke via the absolute
+  path (`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`) — it already
+  passes `-NoProfile -NonInteractive`, which is the other half of that hardening.
+- **Pillow decodes untrusted network bytes every cycle** — keep Pillow current
+  (`uv.lock` pins it; `uv lock --upgrade-package pillow` periodically), and keep the
+  decompression-bomb guard enabled when fixing bug 5 above.
+- **`overlay_shell_command` stdout is read unbounded** (`capture_output=True`). A
+  runaway/malicious provider process can exhaust memory before the timeout fires.
+  Low priority (the command is already trusted config), but a size cap would make
+  the failure mode graceful.
+- **GitHub Actions are pinned by tag** (`actions/checkout@v4`, `astral-sh/setup-uv@v5`),
+  not commit SHA. Tag-pinning trusts the action repo not to move the tag; SHA-pinning
+  is the standard hardening if supply-chain risk matters here.
+- **`user_agent` still points at the upstream repo** (`+https://github.com/pjlhjr/...`).
+  Not a vulnerability, but the point of a contact URL in a UA string is that NOAA can
+  reach the operator — it should point at this fork.
+
 ## Verification notes worth knowing
 
 A few non-obvious things learned while building and testing this, not really
@@ -224,3 +311,27 @@ A few non-obvious things learned while building and testing this, not really
       problem; the actual per-combo-overlay configurability this item describes is
       still open, and whatever shape it takes needs to extend `_geojson_files_cache_id`
       (or its equivalent) to also key on which combo-specific files were mixed in.
+17. ~~**`DEFAULT_DATA_DIR` hardcodes Windows' AppData layout in the cross-platform
+    core.**~~ Done: `WallpaperPlatform` gained `default_data_dir()`/
+    `default_font_path()` abstract methods (implemented in `WindowsPlatform`), and
+    `load_config(..., platform=...)` — as called from `main()` — prefers those over
+    Config's own Windows-flavored class-level defaults whenever config.toml/CLI
+    don't set `data_dir`/`info_font_path` explicitly. Config's class-level defaults
+    are unchanged (still Windows paths) since they're what direct `Config()`
+    construction — most of the test suite — relies on; a future Linux/macOS backend
+    only needs to implement the two new methods, not touch Config or its defaults.
+18. **GeoJSON overlay providers aren't area-aware.** `overlay_geojson_files`/
+    `overlay_shell_command` call `lonlat_to_pixels(satellite, ...)` directly, so on a
+    `satpy_raw` Full Disk/Mesoscale frame — where `overlay_graticule`/
+    `overlay_cities` *do* work via the real per-frame `AreaInfo` — the GeoJSON
+    providers silently draw nothing (already noted in `draw_overlays`' docstring).
+    Thread `area` down through `_build_geojson_layer`/`_draw_lonlat_run` the same way
+    `draw_graticule` takes it. Cache-key note: `_geojson_files_cache_key`/`_cache_id`
+    would then need the area extent in the key (satellite alone no longer identifies
+    the projection once Full Disk and CONUS frames both render).
+19. **Nothing prunes stale `overlay_geojson_cache_*.png` entries** in `data_dir`
+    (README documents this). Each distinct (files, satellite, frame size, style)
+    combination mints a new pair of files; old ones are left behind forever after a
+    config change. Full-frame RGBA PNGs at 5000x3000 aren't tiny — a cheap fix is
+    deleting cache files whose `.json` sidecar hasn't matched in N days, or capping
+    the count. Fold into whatever cache shape gap 16's per-combo work lands on.

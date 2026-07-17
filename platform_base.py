@@ -119,6 +119,18 @@ class WallpaperPlatform(ABC):
         """Best-effort: is the current network connection cost-metered (e.g.
         cellular/tethered)? None if undetectable on this platform."""
 
+    @abstractmethod
+    def default_data_dir(self) -> Path:
+        """Where to store the wallpaper/state/logs when config.toml/--data-dir
+        doesn't say otherwise. Per-platform because e.g. Windows' AppData layout
+        means nothing on Linux/macOS."""
+
+    @abstractmethod
+    def default_font_path(self) -> str:
+        """Info-bar/overlay font to use when info_font_path isn't set in config.
+        Per-platform since font install locations differ; callers already handle
+        this path not existing (falls back to Pillow's built-in default font)."""
+
 
 def get_platform() -> WallpaperPlatform:
     """Construct the backend for the current OS. Takes no arguments deliberately —

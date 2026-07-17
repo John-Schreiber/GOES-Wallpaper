@@ -39,6 +39,13 @@ class FakePlatform(WallpaperPlatform):
     def is_network_metered(self):
         return self._metered
 
+    def default_data_dir(self):
+        from pathlib import Path
+        return Path("/fake-data-dir")
+
+    def default_font_path(self):
+        return "/fake/font.ttf"
+
 
 class TestShouldSkipForPower:
     def test_disabled_never_skips(self):

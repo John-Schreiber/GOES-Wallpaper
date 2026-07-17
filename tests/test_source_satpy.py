@@ -9,7 +9,10 @@ and the sector-name mapping table. Real bucket listing and satpy compositing
 manual-only, same status as goes_wallpaper.py's live CDN fetch path -- see
 CONTRIBUTING.md."""
 
+from pathlib import Path
+
 import pytest
+from PIL import Image
 
 import source_satpy
 
@@ -90,6 +93,55 @@ class TestBucketForSatellite:
     def test_unknown_satellite_raises(self):
         with pytest.raises(ValueError, match="No known raw-data S3 bucket"):
             source_satpy._bucket_for_satellite("GOES99")
+
+
+def test_fetch_composite_deletes_stale_band_files_before_downloading(monkeypatch, tmp_path):
+    """Regression test for the satpy_raw_cache disk leak: work_dir must not
+    accumulate previous cycles' band files (scan-unique names) forever."""
+    try:
+        import s3fs
+    except ImportError:
+        pytest.skip("s3fs (satpy-raw extra) not installed in this environment")
+
+    stale = tmp_path / "OR_ABI-L1b-RadC-M6C01_G18_s20241601700000_e20241601703373_c20241601703410.nc"
+    stale.write_bytes(b"stale")
+
+    new_token = "20241601801173"
+    new_keys = {b: _key(b, new_token) for b in (1, 2, 3, 13)}
+    selection = source_satpy._ScanSelection(
+        scan_time_utc="2024-06-08T18:01:17+00:00", scan_time_token=new_token, keys=new_keys,
+    )
+    monkeypatch.setattr(source_satpy, "_list_latest_complete_scan", lambda *a, **k: selection)
+
+    class FakeS3FileSystem:
+        def __init__(self, anon=True):
+            pass
+
+        def get(self, key, local_path):
+            Path(local_path).write_bytes(b"data")
+
+    monkeypatch.setattr(s3fs, "S3FileSystem", FakeS3FileSystem)
+
+    class FakeCRS:
+        def to_dict(self):
+            return {}
+
+    class FakeArea:
+        area_extent = (0, 0, 1, 1)
+        crs = FakeCRS()
+
+    fake_image = Image.new("RGB", (2, 2))
+    monkeypatch.setattr(
+        source_satpy, "_composite_true_color_with_muted_ir_night",
+        lambda files: (fake_image, FakeArea()),
+    )
+
+    result = source_satpy.fetch_composite("GOES18", "CONUS", None, tmp_path)
+
+    assert result is not None
+    assert not stale.exists()
+    for key in new_keys.values():
+        assert (tmp_path / Path(key).name).exists()
 
 
 def test_check_available_raises_actionable_error_when_satpy_not_installed():
