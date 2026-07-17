@@ -112,8 +112,10 @@ inline comment; the highlights:
   `"per_monitor"`) plus a list of named `[[combos]]`, each optionally overriding
   satellite/sector/product/resolution and carrying its own crop box. See "Multi-source
   combos" below.
-* **Georeferenced overlays** — `overlay_graticule` (lat/lon grid) and `overlay_cities`
-  (labeled markers) drawn accurately onto the image, CONUS only. See "Georeferenced
+* **Georeferenced overlays** — `overlay_graticule` (lat/lon grid), `overlay_cities`
+  (labeled markers), `overlay_geojson_files` (a cached, static list of GeoJSON files),
+  and `overlay_shell_command` (an external command whose stdout is parsed as GeoJSON
+  and rendered) drawn accurately onto the image, CONUS only. See "Georeferenced
   overlays" below.
 
 ## Multi-source combos
@@ -162,6 +164,80 @@ something misplaced.
 This adds content on top — it doesn't and can't remove NOAA's own baked-in state
 lines/logo (see "Source image caveats" below for why). Marker/line sizes are tuned for
 a ~2000px-wide frame and scale up automatically at higher `resolution` settings.
+
+`overlay_geojson_files` takes a list of local GeoJSON file paths — for content that
+doesn't change cycle to cycle (state/county borders, a coastline layer, a fixed set of
+markers). Every file's features are merged and drawn with the same
+`Point`/`LineString`/`Polygon`/`Multi*` support and styling described in "GeoJSON
+overlay styling" below, but the composited result is cached as a PNG in `data_dir`
+(`overlay_geojson_cache.png` + a small `.json` sidecar recording what produced it) —
+keyed on each file's path *and* modification time, plus satellite/resolution/style. An
+unchanged config only pays the parse/project/draw cost once; editing a file, bumping
+`resolution`, or changing any `overlay_geojson_*` setting invalidates the cache
+automatically and it's rebuilt on the next cycle. Style config: `overlay_geojson_color`,
+`overlay_geojson_line_width`, `overlay_geojson_marker_radius`,
+`overlay_geojson_opacity`, `overlay_geojson_font_size`.
+
+`overlay_shell_command` runs an external command (an argv list, e.g. `["python",
+"fetch_storms.py"]` — not a shell string, so there's no shell-injection risk) once per
+cycle and expects a GeoJSON `FeatureCollection`/`Feature`/bare geometry on stdout.
+Whatever `Point`/`LineString`/`Polygon` (or `Multi*`) features it returns are drawn with
+the same styling described below. A non-zero exit code, a timeout
+(`overlay_shell_timeout`), or unparseable stdout is logged and skipped rather than
+breaking the update cycle. Unlike `overlay_geojson_files`, this always re-runs the
+command every cycle — there's no caching, since the whole point of shelling out is
+presumably to pick up genuinely fresh data. Style config: `overlay_shell_color`,
+`overlay_shell_line_width`, `overlay_shell_marker_radius`, `overlay_shell_opacity`,
+`overlay_shell_font_size`.
+
+Both are minimal first steps toward the fuller `OverlayProvider` plugin interface
+scoped in `NEXT_STEPS.md` (a real plugin registry with multiple named providers,
+independent fetch cadence, and per-plugin failure isolation) — good for one static
+file set and one external script, not yet a general multi-provider system.
+
+### GeoJSON overlay styling
+
+Both `overlay_geojson_files` and `overlay_shell_command` draw through the same shared
+code (`_build_geojson_layer` in `goes_wallpaper.py`), so they're styled identically —
+just from their own separate set of `overlay_geojson_*`/`overlay_shell_*` config
+fields. For a given feature:
+
+* **Geometry type decides the draw call.** `Point`/`MultiPoint` → an outlined circle
+  (radius = `..._marker_radius`, stroke width = `..._line_width`) at each point.
+  `LineString`/`MultiLineString` → an open polyline. `Polygon`/`MultiPolygon` → each
+  ring drawn as a *closed, outlined* loop — **not filled**; there's no fill color
+  config, only stroke. Any other/missing `geometry.type` (e.g. `GeometryCollection`, or
+  a feature with no `geometry` at all) is silently skipped, not an error.
+* **`Point`/`MultiPoint` features get a text label from `properties.name`**, drawn next
+  to the marker the same way `overlay_cities` labels a city (font size:
+  `..._font_size`, using the shared `info_font_path`; falls back to a built-in default
+  font if that path can't be loaded). No `name` property means no label — just the
+  marker. A `MultiPoint`'s single `name` is drawn next to *every* point in it, since
+  GeoJSON has no way to give each point its own name. `LineString`/`Polygon` features
+  ignore `properties.name` entirely — there's no single anchor point to draw a label
+  at.
+* **Only color and (for points) the label are overridable per feature.** A feature's
+  `properties.color` replaces `..._color` for that one feature — accepts an `[r, g, b]`
+  list, a hex string (`"#ff8800"`), or any of PIL's ~140 named colors (`"red"`), so
+  GeoJSON exported from common tools (geojson.io, GitHub's simplestyle-spec) works
+  as-is without converting colors to lists first. A value that doesn't parse as any of
+  those falls back to `..._color` (logged), rather than raising and losing the whole
+  overlay over one bad feature. Handy for e.g. color-coding storm tracks by category,
+  or fire perimeters by containment status. Line width, marker radius, opacity, and
+  font size always come from config; there's no `properties.line_width` or similar for
+  those.
+* **Opacity is a single alpha value** (`..._opacity`, 0–255) applied uniformly to every
+  feature's fill color when compositing — not part of `properties`, and not adjustable
+  per feature the way color is.
+* **Line width and marker radius scale with output resolution**, exactly like
+  `overlay_graticule`/`overlay_cities`: both are tuned for a ~2000px-wide frame
+  (`_OVERLAY_REFERENCE_WIDTH_PX`) and scale up proportionally at higher `resolution`
+  settings, so a config tuned at one resolution still looks right at another.
+* **A point/vertex that projects outside the visible frame breaks the line/ring at
+  that point** rather than drawing a stray edge across the image — the same
+  run-breaking behavior `draw_graticule` uses. For a `Polygon`, this means a shape with
+  a corner just outside the frame renders as an open outline missing the two edges
+  that meet at that corner, not a rubber-banded line back across the frame.
 
 ## Power/network-aware fallbacks
 

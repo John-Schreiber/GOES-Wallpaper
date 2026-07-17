@@ -40,6 +40,7 @@ import io
 import json
 import logging
 import random
+import subprocess
 import sys
 import time
 import tomllib
@@ -51,7 +52,7 @@ from typing import Any
 
 import numpy as np
 import requests
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 from pyproj import CRS, Transformer
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -185,6 +186,38 @@ class Config:
     overlay_city_color: tuple[int, int, int] = (255, 60, 60)
     overlay_city_font_size: int = 18
 
+    # A single external overlay provider: runs `overlay_shell_command` (an argv list,
+    # not a shell string -- no shell parsing, so no shell-injection risk) once per
+    # cycle and expects a GeoJSON FeatureCollection/Feature/geometry on stdout. Draws
+    # whatever Point/LineString/Polygon (or Multi* variant) features it returns --
+    # e.g. a script that fetches NHC storm tracks or NIFC fire perimeters and prints
+    # GeoJSON. Empty tuple (the default) disables it. A non-zero exit code, a timeout,
+    # or unparseable stdout is logged and skipped, same as the CONUS/calibration
+    # checks above -- a broken provider must not break the whole update cycle.
+    overlay_shell_command: tuple[str, ...] = ()
+    overlay_shell_timeout: float = 10.0
+    overlay_shell_color: tuple[int, int, int] = (0, 200, 255)
+    overlay_shell_line_width: int = 2
+    overlay_shell_marker_radius: int = 5
+    overlay_shell_opacity: int = 200
+    overlay_shell_font_size: int = 14  # for Point features carrying a `name` property
+
+    # A static overlay provider: reads GeoJSON from each path in
+    # `overlay_geojson_files` (unlike overlay_shell_command, no re-fetching -- these
+    # are files on disk that don't change cycle to cycle), merges every file's
+    # features, and draws them the same way overlay_shell_command's output is drawn.
+    # The composited RGBA layer is cached in cfg.data_dir, keyed on each file's path +
+    # mtime plus (satellite, frame size, style) -- so editing a file, changing
+    # resolution/satellite, or changing overlay_geojson_* below invalidates the cache
+    # automatically, but an unchanged config only re-parses/re-projects once instead
+    # of every single cycle.
+    overlay_geojson_files: tuple[str, ...] = ()
+    overlay_geojson_color: tuple[int, int, int] = (255, 255, 255)
+    overlay_geojson_line_width: int = 1
+    overlay_geojson_marker_radius: int = 5
+    overlay_geojson_opacity: int = 160
+    overlay_geojson_font_size: int = 14  # for Point features carrying a `name` property
+
     # Multiple named source+crop combos (see the Combo dataclass), and how to use
     # them. combos are ignored entirely in "single" mode (the default — just the
     # top-level satellite/sector/product/resolution/source_crop_* fields above).
@@ -304,6 +337,14 @@ def load_config(config_path: Path, overrides: dict[str, Any]) -> Config:
         values["overlay_graticule_color"] = tuple(values["overlay_graticule_color"])
     if "overlay_city_color" in values:
         values["overlay_city_color"] = tuple(values["overlay_city_color"])
+    if "overlay_shell_command" in values:
+        values["overlay_shell_command"] = tuple(values["overlay_shell_command"])
+    if "overlay_shell_color" in values:
+        values["overlay_shell_color"] = tuple(values["overlay_shell_color"])
+    if "overlay_geojson_files" in values:
+        values["overlay_geojson_files"] = tuple(values["overlay_geojson_files"])
+    if "overlay_geojson_color" in values:
+        values["overlay_geojson_color"] = tuple(values["overlay_geojson_color"])
     if "combos" in values:
         combo_fields = {f.name for f in fields(Combo)}
         parsed = []
@@ -606,6 +647,11 @@ _GEOS_AREA_CONUS = {
     "GOES19": {"lon_0": -75.0, "extent": (-3627271.29128, 1583173.65752, 1382771.92872, 4589199.58952)},
 }
 
+# Overlay line widths/marker sizes below are tuned by eye at this frame width, then
+# scaled proportionally for other resolutions (draw_graticule, draw_city_markers) —
+# not a physical/measured constant, just the width the original tuning pass used.
+_OVERLAY_REFERENCE_WIDTH_PX = 2000
+
 _geos_transformers: dict[str, Transformer] = {}
 
 
@@ -646,7 +692,7 @@ def draw_graticule(img: Image.Image, satellite: str, step_deg: float, color: tup
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     fill = (*color, opacity)
-    line_width = max(1, round(w / 2000))  # a 1px line is invisible at 5000x3000+
+    line_width = max(1, round(w / _OVERLAY_REFERENCE_WIDTH_PX))  # a 1px line is invisible at 5000x3000+
 
     def draw_run(cols: np.ndarray, rows: np.ndarray) -> None:
         run: list[tuple[float, float]] = []
@@ -689,7 +735,7 @@ def draw_city_markers(img: Image.Image, satellite: str, cities: tuple[CityMarker
         return img
     cols, rows = result
 
-    scale = max(1.0, w / 2000)  # base sizes below are tuned for a ~2000px-wide frame
+    scale = max(1.0, w / _OVERLAY_REFERENCE_WIDTH_PX)
     img = img.convert("RGB")
     draw = ImageDraw.Draw(img)
     try:
@@ -707,11 +753,264 @@ def draw_city_markers(img: Image.Image, satellite: str, cities: tuple[CityMarker
     return img
 
 
+def fetch_shell_geojson(command: tuple[str, ...], timeout: float) -> dict[str, Any] | None:
+    """Run an external command (argv list, no shell parsing) and parse its stdout as
+    GeoJSON. Returns None (logged) on any failure -- a broken provider must not break
+    the whole update cycle."""
+    if not command:
+        return None
+    try:
+        result = subprocess.run(list(command), capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logging.warning("overlay_shell_command %s failed to run: %s", command, e)
+        return None
+    if result.returncode != 0:
+        logging.warning(
+            "overlay_shell_command %s exited %d: %s", command, result.returncode, result.stderr.strip(),
+        )
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        logging.warning("overlay_shell_command %s returned invalid JSON: %s", command, e)
+        return None
+
+
+def _iter_geojson_features(geojson: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize a parsed GeoJSON payload (FeatureCollection, single Feature, or a
+    bare geometry) to a flat list of Feature-shaped dicts."""
+    gtype = geojson.get("type")
+    if gtype == "FeatureCollection":
+        return [f for f in geojson.get("features", []) if isinstance(f, dict)]
+    if gtype == "Feature":
+        return [geojson]
+    if gtype:  # bare geometry, e.g. {"type": "Point", "coordinates": [...]}
+        return [{"type": "Feature", "geometry": geojson, "properties": {}}]
+    return []
+
+
+def _resolve_feature_color(prop_color: Any, default: tuple[int, int, int]) -> tuple[int, int, int]:
+    """Resolve a feature's `properties.color` to an (r, g, b) tuple. Accepts an
+    [r, g, b] list/tuple (the documented format) or a string -- either a hex code
+    (`"#ff0000"`) or one of PIL's ~140 named colors (`"red"`), since that's what
+    real-world GeoJSON tools (geojson.io, GitHub's simplestyle-spec) actually emit.
+    Falls back to `default` (logged) for anything that doesn't parse, rather than
+    raising and losing the whole overlay over one bad feature."""
+    if not prop_color:
+        return default
+    if isinstance(prop_color, str):
+        try:
+            return ImageColor.getrgb(prop_color)[:3]
+        except ValueError:
+            logging.warning("Unrecognized properties.color %r; using default color", prop_color)
+            return default
+    try:
+        return (int(prop_color[0]), int(prop_color[1]), int(prop_color[2]))
+    except (TypeError, IndexError, ValueError):
+        logging.warning("Unrecognized properties.color %r; using default color", prop_color)
+        return default
+
+
+def _draw_lonlat_run(
+    draw: ImageDraw.ImageDraw, satellite: str, coords: list[list[float]], w: int, h: int,
+    fill: tuple[int, ...], width: int, close: bool = False,
+) -> None:
+    """Project a line/ring of [lon, lat] pairs and draw it, breaking the line
+    wherever a point falls outside the frame (same run-breaking approach as
+    draw_graticule's draw_run)."""
+    if len(coords) < 2:
+        return
+    if close and coords[0] != coords[-1]:
+        coords = [*coords, coords[0]]
+    lons = np.array([c[0] for c in coords])
+    lats = np.array([c[1] for c in coords])
+    result = lonlat_to_pixels(satellite, lons, lats, w, h)
+    if result is None:
+        return
+    cols, rows = result
+    run: list[tuple[float, float]] = []
+    for c, r in zip(cols, rows):
+        if 0 <= c <= w and 0 <= r <= h and np.isfinite(c) and np.isfinite(r):
+            run.append((float(c), float(r)))
+        else:
+            if len(run) > 1:
+                draw.line(run, fill=fill, width=width)
+            run = []
+    if len(run) > 1:
+        draw.line(run, fill=fill, width=width)
+
+
+def _build_geojson_layer(
+    satellite: str, features: list[dict[str, Any]], w: int, h: int,
+    color: tuple[int, int, int], line_width: int, marker_radius: int, opacity: int,
+    font_path: str = "", font_size: int = 14,
+) -> Image.Image:
+    """Project + draw Point/MultiPoint/LineString/MultiLineString/Polygon/
+    MultiPolygon features onto a fresh (w, h) transparent RGBA layer. Per-feature
+    `properties.color` (see _resolve_feature_color -- an [r, g, b] list, a hex string,
+    or a named color) overrides the given default color; a Point/MultiPoint feature's
+    `properties.name`, if present, is drawn as a text label next to its marker (same
+    layout as draw_city_markers). Returns just the layer (not
+    composited onto anything) so callers can cache it."""
+    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    scale = max(1.0, w / _OVERLAY_REFERENCE_WIDTH_PX)
+    width = max(1, round(line_width * scale))
+    radius = marker_radius * scale
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont | None = None  # loaded lazily, only if a label is actually drawn
+
+    def draw_point(lon: float, lat: float, fill: tuple[int, ...], label: str | None) -> None:
+        nonlocal font
+        result = lonlat_to_pixels(satellite, np.array([lon]), np.array([lat]), w, h)
+        if result is None:
+            return
+        c, r = result[0][0], result[1][0]
+        if not (0 <= c <= w and 0 <= r <= h and np.isfinite(c) and np.isfinite(r)):
+            return
+        draw.ellipse((c - radius, r - radius, c + radius, r + radius), outline=fill, width=width)
+        if label:
+            if font is None:
+                try:
+                    font = ImageFont.truetype(font_path, round(font_size * scale))
+                except OSError:
+                    font = ImageFont.load_default()
+            draw.text((c + radius + 4, r), label, font=font, fill=fill)
+
+    for feature in features:
+        geometry = feature.get("geometry") or {}
+        gtype = geometry.get("type")
+        coords = geometry.get("coordinates")
+        if gtype is None or coords is None:
+            continue
+        props = feature.get("properties") or {}
+        fill = (*_resolve_feature_color(props.get("color"), color), opacity)
+        label = props.get("name")
+
+        if gtype == "Point":
+            draw_point(coords[0], coords[1], fill, label)
+        elif gtype == "MultiPoint":
+            for lon, lat in coords:
+                draw_point(lon, lat, fill, label)
+        elif gtype == "LineString":
+            _draw_lonlat_run(draw, satellite, coords, w, h, fill, width)
+        elif gtype == "MultiLineString":
+            for line in coords:
+                _draw_lonlat_run(draw, satellite, line, w, h, fill, width)
+        elif gtype == "Polygon":
+            for ring in coords:
+                _draw_lonlat_run(draw, satellite, ring, w, h, fill, width, close=True)
+        elif gtype == "MultiPolygon":
+            for polygon in coords:
+                for ring in polygon:
+                    _draw_lonlat_run(draw, satellite, ring, w, h, fill, width, close=True)
+
+    return overlay
+
+
+def draw_geojson_overlay(
+    img: Image.Image, satellite: str, geojson: dict[str, Any],
+    color: tuple[int, int, int], line_width: int, marker_radius: int, opacity: int,
+    font_path: str = "", font_size: int = 14,
+) -> Image.Image:
+    """Draw whatever Point/MultiPoint/LineString/MultiLineString/Polygon/MultiPolygon
+    features a GeoJSON payload contains, projected via lonlat_to_pixels. Per-feature
+    `properties.color` ([r, g, b], a hex string, or a named color -- see
+    _resolve_feature_color) overrides the plugin-level default color, and a
+    Point/MultiPoint feature's `properties.name` is drawn as a text label."""
+    features = _iter_geojson_features(geojson)
+    if not features:
+        return img
+    w, h = img.size
+    layer = _build_geojson_layer(satellite, features, w, h, color, line_width, marker_radius, opacity, font_path, font_size)
+    base = img.convert("RGBA")
+    base.alpha_composite(layer)
+    return base.convert("RGB")
+
+
+def _geojson_files_cache_key(
+    paths: tuple[str, ...], satellite: str, w: int, h: int,
+    color: tuple[int, int, int], line_width: int, marker_radius: int, opacity: int,
+    font_path: str, font_size: int,
+) -> dict[str, Any]:
+    """Identifies exactly the inputs that affect the rendered layer -- if any of
+    these change, the cached PNG is stale and must be rebuilt. mtime (not content
+    hashing) is enough to detect an edited file cheaply."""
+    file_stats = []
+    for p in paths:
+        try:
+            mtime = Path(p).stat().st_mtime
+        except OSError:
+            mtime = None
+        file_stats.append([p, mtime])
+    return {
+        "files": file_stats, "satellite": satellite, "w": w, "h": h,
+        "color": list(color), "line_width": line_width, "marker_radius": marker_radius, "opacity": opacity,
+        "font_path": font_path, "font_size": font_size,
+    }
+
+
+def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: EffectiveSource) -> Image.Image:
+    """Draw cfg.overlay_geojson_files onto img, caching the composited RGBA layer in
+    cfg.data_dir. Unlike overlay_shell_command, these are static files that don't
+    change cycle to cycle, so re-parsing and re-projecting every cycle is wasted work
+    once a layer has any real size (e.g. full county borders) -- the cache key (each
+    file's path/mtime + satellite/frame-size/style) means an unchanged config only
+    pays that cost once, but editing a file or bumping resolution rebuilds it
+    automatically."""
+    if not cfg.overlay_geojson_files:
+        return img
+    w, h = img.size
+    key = _geojson_files_cache_key(
+        cfg.overlay_geojson_files, source.satellite, w, h,
+        cfg.overlay_geojson_color, cfg.overlay_geojson_line_width,
+        cfg.overlay_geojson_marker_radius, cfg.overlay_geojson_opacity,
+        cfg.info_font_path, cfg.overlay_geojson_font_size,
+    )
+    cache_png = cfg.data_dir / "overlay_geojson_cache.png"
+    cache_meta = cfg.data_dir / "overlay_geojson_cache.json"
+
+    layer: Image.Image | None = None
+    if cache_png.exists() and cache_meta.exists():
+        try:
+            if json.loads(cache_meta.read_text()) == key:
+                layer = Image.open(cache_png).convert("RGBA")
+        except (OSError, json.JSONDecodeError):
+            layer = None
+
+    if layer is None:
+        features: list[dict[str, Any]] = []
+        for path in cfg.overlay_geojson_files:
+            try:
+                geojson = json.loads(Path(path).read_text())
+            except (OSError, json.JSONDecodeError) as e:
+                logging.warning("overlay_geojson_files: couldn't read/parse %s: %s", path, e)
+                continue
+            features.extend(_iter_geojson_features(geojson))
+        if not features:
+            return img
+        layer = _build_geojson_layer(
+            source.satellite, features, w, h,
+            cfg.overlay_geojson_color, cfg.overlay_geojson_line_width,
+            cfg.overlay_geojson_marker_radius, cfg.overlay_geojson_opacity,
+            cfg.info_font_path, cfg.overlay_geojson_font_size,
+        )
+        try:
+            cfg.data_dir.mkdir(parents=True, exist_ok=True)
+            layer.save(cache_png)
+            cache_meta.write_text(json.dumps(key))
+        except OSError as e:
+            logging.warning("Couldn't write overlay_geojson_files cache: %s", e)
+
+    base = img.convert("RGBA")
+    base.alpha_composite(layer)
+    return base.convert("RGB")
+
+
 def draw_overlays(img: Image.Image, cfg: Config, source: EffectiveSource) -> Image.Image:
     """Apply configured georeferenced overlays. Must run on the raw fetched frame,
     before trim_source_caption/crop_fractional/crop_to_screen — those change the pixel
     grid the calibration above assumes."""
-    if not (cfg.overlay_graticule or cfg.overlay_cities):
+    if not (cfg.overlay_graticule or cfg.overlay_cities or cfg.overlay_shell_command or cfg.overlay_geojson_files):
         return img
     if source.sector != "CONUS":
         logging.warning(
@@ -729,6 +1028,27 @@ def draw_overlays(img: Image.Image, cfg: Config, source: EffectiveSource) -> Ima
         img = draw_graticule(img, source.satellite, cfg.overlay_graticule_step_deg, cfg.overlay_graticule_color, cfg.overlay_graticule_opacity)
     if cfg.overlay_cities:
         img = draw_city_markers(img, source.satellite, cfg.overlay_cities, cfg)
+    if cfg.overlay_geojson_files:
+        try:
+            img = render_static_geojson_overlay(img, cfg, source)
+        except Exception:
+            logging.exception(
+                "[%s] overlay_geojson_files overlay failed; skipping", source.name,
+            )
+    if cfg.overlay_shell_command:
+        geojson = fetch_shell_geojson(cfg.overlay_shell_command, cfg.overlay_shell_timeout)
+        if geojson is not None:
+            try:
+                img = draw_geojson_overlay(
+                    img, source.satellite, geojson,
+                    cfg.overlay_shell_color, cfg.overlay_shell_line_width,
+                    cfg.overlay_shell_marker_radius, cfg.overlay_shell_opacity,
+                    cfg.info_font_path, cfg.overlay_shell_font_size,
+                )
+            except Exception:
+                logging.exception(
+                    "[%s] overlay_shell_command returned unusable GeoJSON; skipping", source.name,
+                )
     return img
 
 
@@ -783,10 +1103,17 @@ def embed_exif(img: Image.Image, meta: dict[str, Any]) -> Image.Image:
     return img
 
 
+# Floor on the info bar's pixel height regardless of info_block_height_frac, so text
+# stays legible at very low resolutions/aggressive crops instead of shrinking to
+# nothing. Not a measurement — just the smallest bar that still fits an ~12px font
+# with padding (see font_size/pad below, which derive from bar_height).
+_INFO_BAR_MIN_HEIGHT_PX = 28
+
+
 def draw_info_block(img: Image.Image, cfg: Config, meta: dict[str, Any], platform: WallpaperPlatform) -> Image.Image:
     img = img.convert("RGB")
     width, height = img.size
-    bar_height = max(28, round(height * cfg.info_block_height_frac))
+    bar_height = max(_INFO_BAR_MIN_HEIGHT_PX, round(height * cfg.info_block_height_frac))
     bottom_margin = platform.get_taskbar_height() if cfg.avoid_taskbar else 0
 
     overlay = Image.new("RGBA", (width, bar_height), (0, 0, 0, cfg.info_block_opacity))

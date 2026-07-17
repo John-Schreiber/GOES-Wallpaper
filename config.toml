@@ -72,6 +72,36 @@ overlay_city_font_size = 18        # base size at ~2000px width; scales up with 
 # Labeled city markers themselves are defined via [[overlay_cities]] at the end of
 # this file (see the note at the top about array-of-tables placement).
 
+# Static GeoJSON files (state/county borders, a coastline layer, a fixed marker set --
+# content that doesn't change cycle to cycle). Point/MultiPoint/LineString/
+# MultiLineString/Polygon/MultiPolygon are all drawn; a feature's `properties.color`
+# ([r, g, b]) overrides the color below for that one feature, and a Point/MultiPoint's
+# `properties.name` draws a text label next to the marker. The composited layer is
+# cached in data_dir (invalidated automatically if a file's content, this satellite/
+# resolution, or any overlay_geojson_* setting below changes) -- an unchanged config
+# only pays the parse/project/draw cost once, not every cycle.
+# overlay_geojson_files = ["overlays/counties.geojson", "overlays/coastline.geojson"]
+overlay_geojson_color = [255, 255, 255]
+overlay_geojson_line_width = 1
+overlay_geojson_marker_radius = 5
+overlay_geojson_opacity = 160
+overlay_geojson_font_size = 14
+
+# An external command run fresh every cycle (an argv list, not a shell string --
+# there's no shell parsing, so no shell-injection risk), whose stdout is parsed as
+# GeoJSON and drawn the same way overlay_geojson_files is. Unlike overlay_geojson_files
+# this is never cached, since the whole point of shelling out is presumably to pick up
+# genuinely fresh data (e.g. a script that fetches live NHC storm tracks or NIFC fire
+# perimeters and prints GeoJSON). A non-zero exit code, a timeout, or unparseable
+# stdout is logged and skipped rather than breaking the update cycle.
+# overlay_shell_command = ["python", "fetch_storms.py"]
+overlay_shell_timeout = 10.0
+overlay_shell_color = [0, 200, 255]
+overlay_shell_line_width = 2
+overlay_shell_marker_radius = 5
+overlay_shell_opacity = 200
+overlay_shell_font_size = 14
+
 # --- Multi-source combos (optional) ---
 # Define named source+crop presets and how to use them. Ignored entirely unless
 # combo_mode is set below. Any field left unset on a combo falls back to the

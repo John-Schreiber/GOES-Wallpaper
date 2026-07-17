@@ -39,6 +39,7 @@ import logging
 import subprocess
 from ctypes import wintypes
 from pathlib import Path
+from typing import NamedTuple
 
 import comtypes
 import comtypes.client
@@ -50,19 +51,24 @@ from platform_base import MonitorInfo, PowerState, WallpaperPlatform
 
 _NONINTERACTIVE_DEFAULT_SIZE = (1024, 768)
 
-_WALLPAPER_REGISTRY_CODES = {
-    # (WallpaperStyle, TileWallpaper) registry values under Control Panel\Desktop
-    "fill": ("10", "0"),
-    "fit": ("6", "0"),
-    "stretch": ("2", "0"),
-    "tile": ("0", "1"),
-    "center": ("0", "0"),
-    "span": ("22", "0"),
-}
+class _StyleCodes(NamedTuple):
+    """The two independent Windows numeric schemes for one wallpaper_style value:
+    the legacy Control Panel\\Desktop registry pair (used by apply_wallpaper, the
+    single-monitor SystemParametersInfoW path) and the DESKTOP_WALLPAPER_POSITION enum
+    (shobjidl.h, used by IDesktopWallpaper::SetPosition, the per-monitor path). Kept as
+    one entry per style so the two schemes can't drift out of sync with each other."""
+    registry_style: str
+    registry_tile: str
+    position: int
 
-_DESKTOP_WALLPAPER_POSITION = {
-    # DESKTOP_WALLPAPER_POSITION enum (shobjidl.h), used by IDesktopWallpaper::SetPosition
-    "center": 0, "tile": 1, "stretch": 2, "fit": 3, "fill": 4, "span": 5,
+
+_WALLPAPER_STYLE_CODES = {
+    "fill": _StyleCodes("10", "0", 4),
+    "fit": _StyleCodes("6", "0", 3),
+    "stretch": _StyleCodes("2", "0", 2),
+    "tile": _StyleCodes("0", "1", 1),
+    "center": _StyleCodes("0", "0", 0),
+    "span": _StyleCodes("22", "0", 5),
 }
 
 _CLSID_DESKTOP_WALLPAPER = GUID("{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}")
@@ -200,10 +206,10 @@ class WindowsPlatform(WallpaperPlatform):
     def apply_wallpaper(self, path: Path, style: str) -> None:
         import winreg
 
-        wallpaper_style, tile = _WALLPAPER_REGISTRY_CODES.get(style, _WALLPAPER_REGISTRY_CODES["fill"])
+        codes = _WALLPAPER_STYLE_CODES.get(style, _WALLPAPER_STYLE_CODES["fill"])
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop", 0, winreg.KEY_SET_VALUE) as key:
-            winreg.SetValueEx(key, "WallpaperStyle", 0, winreg.REG_SZ, wallpaper_style)
-            winreg.SetValueEx(key, "TileWallpaper", 0, winreg.REG_SZ, tile)
+            winreg.SetValueEx(key, "WallpaperStyle", 0, winreg.REG_SZ, codes.registry_style)
+            winreg.SetValueEx(key, "TileWallpaper", 0, winreg.REG_SZ, codes.registry_tile)
 
         SPI_SETDESKWALLPAPER = 0x14
         SPIF_UPDATEINIFILE = 0x1
@@ -237,7 +243,7 @@ class WindowsPlatform(WallpaperPlatform):
         comtypes.CoInitialize()
         try:
             idw = comtypes.client.CreateObject(_CLSID_DESKTOP_WALLPAPER, interface=_IDesktopWallpaper)
-            idw.SetPosition(_DESKTOP_WALLPAPER_POSITION.get(style, _DESKTOP_WALLPAPER_POSITION["fill"]))
+            idw.SetPosition(_WALLPAPER_STYLE_CODES.get(style, _WALLPAPER_STYLE_CODES["fill"]).position)
             for mon_id, path in assignments.items():
                 idw.SetWallpaper(mon_id, str(path))
         finally:
