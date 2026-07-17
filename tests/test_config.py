@@ -56,6 +56,26 @@ class TestLoadConfig:
         assert cfg.overlay_graticule_color == (1, 2, 3)
         assert cfg.overlay_city_color == (4, 5, 6)
 
+    def test_overlay_shell_command_becomes_tuple(self, tmp_path):
+        p = write_toml(tmp_path, 'overlay_shell_command = ["python", "fetch.py"]\n')
+        cfg = gw.load_config(p, {})
+        assert cfg.overlay_shell_command == ("python", "fetch.py")
+
+    def test_overlay_shell_color_becomes_tuple(self, tmp_path):
+        p = write_toml(tmp_path, "overlay_shell_color = [7, 8, 9]\n")
+        cfg = gw.load_config(p, {})
+        assert cfg.overlay_shell_color == (7, 8, 9)
+
+    def test_overlay_geojson_files_becomes_tuple(self, tmp_path):
+        p = write_toml(tmp_path, 'overlay_geojson_files = ["a.geojson", "b.geojson"]\n')
+        cfg = gw.load_config(p, {})
+        assert cfg.overlay_geojson_files == ("a.geojson", "b.geojson")
+
+    def test_overlay_geojson_color_becomes_tuple(self, tmp_path):
+        p = write_toml(tmp_path, "overlay_geojson_color = [10, 11, 12]\n")
+        cfg = gw.load_config(p, {})
+        assert cfg.overlay_geojson_color == (10, 11, 12)
+
     def test_combos_parsed_into_dataclasses(self, tmp_path):
         p = write_toml(tmp_path, '''
 combo_mode = "rotate"

@@ -2,6 +2,27 @@
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- `overlay_geojson_files` — a list of local GeoJSON files (state/county borders, a
+  coastline layer, a fixed marker set) drawn as georeferenced overlays alongside
+  `overlay_graticule`/`overlay_cities`. Supports `Point`/`MultiPoint`/`LineString`/
+  `MultiLineString`/`Polygon`/`MultiPolygon`, with per-feature `properties.color`
+  overrides accepting an `[r, g, b]` list, a hex string, or any PIL named color (so
+  GeoJSON from geojson.io/GitHub's simplestyle-spec works as-is). The composited
+  layer is cached in `data_dir`, keyed on each file's path/mtime plus
+  satellite/resolution/style, so an unchanged config only pays the parse/project/draw
+  cost once instead of every cycle.
+- `overlay_shell_command` — an external command (argv list, no shell parsing) run
+  once per cycle whose stdout is parsed as GeoJSON and drawn the same way as
+  `overlay_geojson_files`, but never cached, for genuinely fresh data (live storm
+  tracks, fire perimeters, etc.). A non-zero exit code, timeout, or unparseable
+  stdout is logged and skipped rather than breaking the update cycle.
+- Point/MultiPoint features from either provider above can carry a `properties.name`
+  to draw a text label next to the marker, matching how `overlay_cities` labels a
+  city.
+
 ## [2.0.0] — 2026-07-16 — full modernization
 
 A ground-up rewrite of the original single-file script. Highlights:
