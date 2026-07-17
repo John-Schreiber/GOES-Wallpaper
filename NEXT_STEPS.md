@@ -157,3 +157,65 @@ A few non-obvious things learned while building and testing this, not really
     doesn't handle cleanly — would need dedicated testing, possibly a documented
     fallback (skip power/network detection gracefully) if freezing that dependency
     turns out to be unreliable.
+15. **Improve config orthogonality/composability.** `Config` has accumulated several
+    near-duplicate field families instead of one shared shape reused across features.
+    Sharpest example, from the overlay-provider work above: `overlay_city_color`/
+    `overlay_city_marker_radius`/`overlay_city_font_size`, `overlay_shell_color`/
+    `overlay_shell_line_width`/`overlay_shell_marker_radius`/`overlay_shell_opacity`/
+    `overlay_shell_font_size`, and `overlay_geojson_color`/`overlay_geojson_line_width`/
+    `overlay_geojson_marker_radius`/`overlay_geojson_opacity`/`overlay_geojson_font_size`
+    are three separately-prefixed copies of the same underlying "overlay style" shape
+    (color/line width/marker radius/opacity/font size), repeated per provider instead
+    of defined once. The lack of composability is the same root cause:
+    `overlay_shell_command`/`overlay_geojson_files` are each exactly one hardcoded
+    provider slot (not a list), so there's no way to run two independently-styled
+    GeoJSON file sets, or two shell commands, at once. Item 9's `[[overlay_plugins]]`
+    design already points at the fix — a shared style sub-shape (e.g. an
+    `OverlayStyle` dataclass: color/line_width/marker_radius/opacity/font_size)
+    embedded once per `[[overlay_plugins]]` entry would eliminate the field-family
+    duplication *and* give composability for free, rather than being two separate
+    problems. Worth deciding whether to do this style-unification as its own
+    preparatory step before building the full plugin registry, or fold it into that
+    same change. Also worth a broader pass over `Config` for the same pattern
+    elsewhere (`combo_*`/`source_crop_*`/other prefix families) before the dataclass
+    grows further.
+16. **Per-combo overlay scoping.** All `overlay_*` config (`overlay_graticule`,
+    `overlay_cities`, `overlay_shell_command`, `overlay_geojson_files`) lives only on
+    the top-level `Config`, and `draw_overlays(img, cfg, source)` always draws from
+    that same global `cfg` — `EffectiveSource`/`Combo` carry no overlay fields at all,
+    unlike `satellite`/`sector`/`product`/`resolution`, which each combo *can* override
+    (`combo.satellite or cfg.satellite`, see `resolve_source()`). So in `"rotate"`/
+    `"per_monitor"` mode, every combo gets the exact same overlays today — there's no
+    way to say "GOES18 CONUS GEOCOLOR gets city markers" and "GOES19 CONUS Band 13
+    gets the live storm-track overlay" as two different combos, only all-or-nothing.
+    - **Decided: additive, not override.** The top-level `overlay_*` config stays a
+      *global* overlay set that always applies to every combo (today's behavior,
+      unchanged — `combo_mode = "single"` or any combo that doesn't care about
+      overlays needs zero new config). Each `Combo` can *additionally* carry its own
+      extra overlay content that layers on top *only* for that specific combo — e.g.
+      every combo gets the global graticule, but only the GOES19 storm-track combo
+      also gets that particular `overlay_shell_command`'s output composited on top of
+      it. Not a per-combo override/replacement of the global set — both draw, global
+      first, combo-specific second.
+    - Still needs a config shape decision for the per-combo half: mirror the
+      `combo.field or cfg.field` per-field-override pattern directly onto `Combo`
+      (simple, but multiplies the field-family duplication item 15 already flags), or
+      let a combo reference a named overlay set/preset defined once elsewhere and
+      reused across combos (less duplication, but a new indirection this config
+      format doesn't have anywhere else yet). Also needs deciding how a combo-specific
+      `overlay_geojson_files`/`overlay_shell_command` composes with the global one if
+      both are set for the same combo (concatenate the feature lists before one
+      draw pass, vs. two independent draw passes) — matters for cache-key design too
+      (see below), since "the same file list" and "two lists concatenated" shouldn't
+      collide in the cache.
+    - *Partially adjacent fix already shipped:* the global-config gap used to also
+      corrupt `overlay_geojson_files`'s cache — it lived at one fixed filename
+      regardless of satellite/resolution/style, so combos spanning more than one
+      satellite would invalidate and overwrite each other's cache every single cycle
+      (verified: alternating two satellites rebuilt on all 4 of 4 renders). Fixed by
+      keying the cache *filename* itself on (files, satellite, frame size, style) —
+      `_geojson_files_cache_id()` — so distinct combos now get independent cache
+      entries and no longer thrash. That only fixed the caching *correctness*
+      problem; the actual per-combo-overlay configurability this item describes is
+      still open, and whatever shape it takes needs to extend `_geojson_files_cache_id`
+      (or its equivalent) to also key on which combo-specific files were mixed in.

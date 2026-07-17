@@ -11,9 +11,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `MultiLineString`/`Polygon`/`MultiPolygon`, with per-feature `properties.color`
   overrides accepting an `[r, g, b]` list, a hex string, or any PIL named color (so
   GeoJSON from geojson.io/GitHub's simplestyle-spec works as-is). The composited
-  layer is cached in `data_dir`, keyed on each file's path/mtime plus
-  satellite/resolution/style, so an unchanged config only pays the parse/project/draw
-  cost once instead of every cycle.
+  layer is cached in `data_dir` as its own file per distinct (files, satellite, frame
+  size, style) combination, so combos spanning more than one satellite/resolution
+  each get their own cache entry instead of invalidating and overwriting each other's
+  every cycle — an unchanged config only pays the parse/project/draw cost once.
 - `overlay_shell_command` — an external command (argv list, no shell parsing) run
   once per cycle whose stdout is parsed as GeoJSON and drawn the same way as
   `overlay_geojson_files`, but never cached, for genuinely fresh data (live storm

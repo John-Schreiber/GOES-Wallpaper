@@ -170,13 +170,17 @@ doesn't change cycle to cycle (state/county borders, a coastline layer, a fixed 
 markers). Every file's features are merged and drawn with the same
 `Point`/`LineString`/`Polygon`/`Multi*` support and styling described in "GeoJSON
 overlay styling" below, but the composited result is cached as a PNG in `data_dir`
-(`overlay_geojson_cache.png` + a small `.json` sidecar recording what produced it) —
-keyed on each file's path *and* modification time, plus satellite/resolution/style. An
-unchanged config only pays the parse/project/draw cost once; editing a file, bumping
-`resolution`, or changing any `overlay_geojson_*` setting invalidates the cache
-automatically and it's rebuilt on the next cycle. Style config: `overlay_geojson_color`,
-`overlay_geojson_line_width`, `overlay_geojson_marker_radius`,
-`overlay_geojson_opacity`, `overlay_geojson_font_size`.
+(`overlay_geojson_cache_<id>.png` + a matching `.json` sidecar recording what produced
+it, where `<id>` is a short hash of the file paths/satellite/frame size/style — so a
+combo using CONUS/GOES18 at 2500×1500 and one using CONUS/GOES19 at 5000×3000 each get
+their own cache entry instead of overwriting a shared one). Within one cache entry,
+staleness is checked on each file's path *and* modification time, plus
+satellite/resolution/style. An unchanged config only pays the parse/project/draw cost
+once; editing a file, bumping `resolution`, or changing any `overlay_geojson_*` setting
+invalidates that entry and it's rebuilt on the next cycle (old entries for
+since-changed configs are simply left behind in `data_dir` — nothing prunes them).
+Style config: `overlay_geojson_color`, `overlay_geojson_line_width`,
+`overlay_geojson_marker_radius`, `overlay_geojson_opacity`, `overlay_geojson_font_size`.
 
 `overlay_shell_command` runs an external command (an argv list, e.g. `["python",
 "fetch_storms.py"]` — not a shell string, so there's no shell-injection risk) once per

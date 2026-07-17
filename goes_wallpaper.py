@@ -36,6 +36,7 @@ module for the interface and platform_windows.py for the (currently only) backen
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import logging
@@ -949,6 +950,29 @@ def _geojson_files_cache_key(
     }
 
 
+def _geojson_files_cache_id(
+    paths: tuple[str, ...], satellite: str, w: int, h: int,
+    color: tuple[int, int, int], line_width: int, marker_radius: int, opacity: int,
+    font_path: str, font_size: int,
+) -> str:
+    """A short, stable identifier for one distinct (files, satellite, frame size,
+    style) combination, used to give each such combination its own cache file. Without
+    this, every combo/satellite/resolution sharing overlay_geojson_files would fight
+    over one fixed filename: rendering combo B would invalidate and overwrite combo
+    A's cached layer (their cache *keys* differ), so alternating between them in
+    "rotate"/"per_monitor" mode would rebuild on every single cycle -- never actually
+    caching anything (see NEXT_STEPS.md item 16 for the related per-combo-overlay
+    gap this compounds). Deliberately excludes each file's mtime -- that still lives
+    in the cache metadata and is checked separately, so editing a file invalidates the
+    existing entry for this identity rather than minting a new cache file."""
+    identity = {
+        "paths": list(paths), "satellite": satellite, "w": w, "h": h,
+        "color": list(color), "line_width": line_width, "marker_radius": marker_radius,
+        "opacity": opacity, "font_path": font_path, "font_size": font_size,
+    }
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
+
+
 def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: EffectiveSource) -> Image.Image:
     """Draw cfg.overlay_geojson_files onto img, caching the composited RGBA layer in
     cfg.data_dir. Unlike overlay_shell_command, these are static files that don't
@@ -956,7 +980,9 @@ def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: Effecti
     once a layer has any real size (e.g. full county borders) -- the cache key (each
     file's path/mtime + satellite/frame-size/style) means an unchanged config only
     pays that cost once, but editing a file or bumping resolution rebuilds it
-    automatically."""
+    automatically. The cache *filename* is itself keyed on satellite/frame-size/style
+    (_geojson_files_cache_id) so distinct combos each get their own cache entry
+    instead of overwriting a shared one -- see its docstring."""
     if not cfg.overlay_geojson_files:
         return img
     w, h = img.size
@@ -966,8 +992,14 @@ def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: Effecti
         cfg.overlay_geojson_marker_radius, cfg.overlay_geojson_opacity,
         cfg.info_font_path, cfg.overlay_geojson_font_size,
     )
-    cache_png = cfg.data_dir / "overlay_geojson_cache.png"
-    cache_meta = cfg.data_dir / "overlay_geojson_cache.json"
+    cache_id = _geojson_files_cache_id(
+        cfg.overlay_geojson_files, source.satellite, w, h,
+        cfg.overlay_geojson_color, cfg.overlay_geojson_line_width,
+        cfg.overlay_geojson_marker_radius, cfg.overlay_geojson_opacity,
+        cfg.info_font_path, cfg.overlay_geojson_font_size,
+    )
+    cache_png = cfg.data_dir / f"overlay_geojson_cache_{cache_id}.png"
+    cache_meta = cfg.data_dir / f"overlay_geojson_cache_{cache_id}.json"
 
     layer: Image.Image | None = None
     if cache_png.exists() and cache_meta.exists():
