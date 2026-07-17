@@ -11,7 +11,12 @@ No network access or real hardware required — platform-specific logic is exerc
 through a `FakePlatform` stub rather than real APIs. Not yet covered: `run_once`/
 `run_loop` end-to-end (would need mocking `requests.Session` too), and
 `platform_windows.py` itself, which is thin enough that manual verification against
-real hardware has been the coverage so far.
+real hardware has been the coverage so far. `source_satpy.py` (the `source_kind =
+"satpy_raw"` path) has the same status for the same reason — its pure band/scan-
+selection logic is unit tested (`tests/test_source_satpy.py`), but real S3 bucket
+access and satpy compositing need `uv sync --extra satpy-raw` and a live fetch to
+verify (`--render-to`, see README's "Tests" section, is the quickest way to do that
+without touching your desktop wallpaper).
 
 ## Adding a platform backend (Linux/macOS)
 
@@ -67,6 +72,8 @@ specific one prioritized over another:
 
 There's no formal process beyond "open a PR" — `main` is protected and requires one.
 `NEXT_STEPS.md` has a running list of known gaps and follow-ups if you're looking for
-something concrete to pick up, and `CUSTOM_IMAGERY_PLAN.md` covers a larger
-not-yet-started initiative (a from-scratch satellite-imagery compositor) if you want
-something bigger.
+something concrete to pick up, and `CUSTOM_IMAGERY_PLAN.md` covers a larger initiative
+(a from-scratch satellite-imagery compositor, `source_kind = "satpy_raw"`) if you want
+something bigger — its first cut has landed, but the doc's own status section lists
+what's still open (bandwidth/compute cost at a sustained `--loop` cadence, the B/A
+hybrid fallback, real VIIRS night-lights).

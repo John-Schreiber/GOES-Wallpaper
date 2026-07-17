@@ -21,9 +21,25 @@ product = "GEOCOLOR"
 # differ (verified: 1808x1808, 5424x5424, 10848x10848); Mesoscale untested.
 resolution = "5000x3000"
 
+# "cdn_jpg" (default) fetches NOAA STAR's pre-rendered JPG, as above. "satpy_raw"
+# instead composites our own GeoColor-style image from raw ABI L1b bands (requires
+# the `satpy-raw` install extra: `uv sync --extra satpy-raw`) -- no baked-in state
+# lines/logo/fake city lights, and georeferenced overlays work on any sector, not
+# just CONUS. `product`/`resolution` above are ignored for this source_kind.
+# BANDWIDTH WARNING: downloads four raw band files every cycle (no cross-cycle
+# caching) -- measured ~98MB for CONUS, considerably more for Full Disk (Band 2
+# alone ~405MB natively). Logged every fetch (search logs for "Downloaded"). Think
+# before enabling this at a tight interval_minutes, especially on a metered
+# connection (metered_resolution can't help here). See README.md's "Custom
+# raw-data source (satpy_raw)" section and CUSTOM_IMAGERY_PLAN.md.
+# source_kind = "satpy_raw"
+source_kind = "cdn_jpg"
+
 # --- Output ---
 # data_dir = "C:/Users/you/AppData/Local/GOES-Wallpaper"  # defaults to that path already
 wallpaper_style = "fill"  # fill | fit | stretch | tile | center | span
+# render_to = "C:/Users/you/Desktop/test_render.jpg"  # save the rendered frame here
+                           # and skip applying it as the wallpaper -- for testing
 
 # --- Screen handling ---
 crop_to_screen = true

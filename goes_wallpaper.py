@@ -45,7 +45,7 @@ import subprocess
 import sys
 import time
 import tomllib
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -99,6 +99,7 @@ class Combo:
     sector: str | None = None
     product: str | None = None
     resolution: str | None = None
+    source_kind: str | None = None  # "cdn_jpg" | "satpy_raw"; falls back to Config.source_kind
     crop_left: float = 0.0
     crop_top: float = 0.0
     crop_right: float = 1.0
@@ -131,9 +132,27 @@ class Config:
     # against a few candidate WxH values before relying on a specific size there.
     resolution: str = "5000x3000"
 
+    # "cdn_jpg" (default): today's behavior, fetch NOAA STAR's pre-rendered JPG.
+    # "satpy_raw": fetch raw ABI L1b bands from the public noaa-goes16/18/19 S3
+    # buckets and composite our own GeoColor-style image via satpy (see
+    # source_satpy.py) — no baked-in state lines/logo/fake city lights, and real
+    # georeferencing for any sector (not just CONUS). Requires the optional
+    # `satpy-raw` install extra; `product` and `resolution` are ignored for this
+    # source_kind (satpy always builds from a fixed band set, resampled to a fixed
+    # target resolution — there's no NOAA product-code or JPG-size-tier
+    # equivalent). Meaningfully heavier per cycle than cdn_jpg — see README.md's
+    # "Custom raw-data source (satpy_raw)" section before enabling on a `--loop`.
+    # See CUSTOM_IMAGERY_PLAN.md for the full design rationale.
+    source_kind: str = "cdn_jpg"
+
     # Output
     data_dir: Path = DEFAULT_DATA_DIR
     wallpaper_style: str = "fill"  # fill | fit | stretch | tile | center | span
+    # If set, also save the rendered frame(s) here and skip applying them as the
+    # desktop wallpaper -- for testing a render (new source_kind, overlays, crop
+    # settings) without touching the real wallpaper. combo_mode = "per_monitor"
+    # writes one file per monitor, with `_monitor{i}` inserted before the extension.
+    render_to: Path | None = None
 
     # Screen handling
     crop_to_screen: bool = True
@@ -289,7 +308,9 @@ class Config:
     # constrained," never as a guess to skip/downgrade on. Both default off so
     # today's behavior is unchanged unless opted into.
     skip_on_battery: bool = False    # skip the whole cycle if running on battery power
-    metered_resolution: str | None = None  # override `resolution` when the network is metered (None = no override)
+    metered_resolution: str | None = None  # override `resolution` when the network is metered (None = no
+    # override); a no-op for source_kind = "satpy_raw" sources, which have no smaller-tier download the
+    # way NOAA's CDN JPGs have discrete size tiers
 
     # Misc
     skip_if_unchanged: bool = True
@@ -332,6 +353,8 @@ def load_config(config_path: Path, overrides: dict[str, Any]) -> Config:
 
     if "data_dir" in values:
         values["data_dir"] = Path(values["data_dir"])
+    if "render_to" in values:
+        values["render_to"] = Path(values["render_to"])
     if "retry_statuses" in values:
         values["retry_statuses"] = tuple(values["retry_statuses"])
     if "overlay_graticule_color" in values:
@@ -394,6 +417,20 @@ def validate_combos(cfg: Config) -> None:
             raise ValueError(f"combo `monitor` indices must be unique: {monitor_indices}")
 
 
+_VALID_SOURCE_KINDS = {"cdn_jpg", "satpy_raw"}
+
+
+def validate_source_kind(cfg: Config) -> None:
+    if cfg.source_kind not in _VALID_SOURCE_KINDS:
+        raise ValueError(f"source_kind must be one of {sorted(_VALID_SOURCE_KINDS)}, got {cfg.source_kind!r}")
+    for combo in cfg.combos:
+        if combo.source_kind is not None and combo.source_kind not in _VALID_SOURCE_KINDS:
+            raise ValueError(
+                f"combos[{combo.name!r}].source_kind must be one of {sorted(_VALID_SOURCE_KINDS)}, "
+                f"got {combo.source_kind!r}"
+            )
+
+
 @dataclass(slots=True)
 class EffectiveSource:
     """The fully-resolved satellite/sector/product/resolution/crop for one cycle —
@@ -404,6 +441,7 @@ class EffectiveSource:
     sector: str
     product: str
     resolution: str
+    source_kind: str
     crop_left: float
     crop_top: float
     crop_right: float
@@ -417,7 +455,11 @@ class EffectiveSource:
     def key(self) -> str:
         """Identifies this exact source for per-source state (ETag/capture-time/
         learned publish phase), so unrelated sources sharing one config never mix up
-        each other's freshness tracking."""
+        each other's freshness tracking. `product`/`resolution` are meaningless for
+        satpy_raw (no NOAA product code or JPG size tier), so they're left out of its
+        key rather than embedding whatever unrelated cfg defaults happen to be set."""
+        if self.source_kind == "satpy_raw":
+            return f"{self.satellite}/{self.sector}/satpy_raw"
         return f"{self.satellite}/{self.sector}/{self.product}/{self.resolution}"
 
     def satellite_label(self) -> str:
@@ -435,6 +477,7 @@ def resolve_source(cfg: Config, combo: Combo | None) -> EffectiveSource:
             sector=cfg.sector,
             product=cfg.product,
             resolution=cfg.resolution,
+            source_kind=cfg.source_kind,
             crop_left=cfg.source_crop_left,
             crop_top=cfg.source_crop_top,
             crop_right=cfg.source_crop_right,
@@ -446,6 +489,7 @@ def resolve_source(cfg: Config, combo: Combo | None) -> EffectiveSource:
         sector=combo.sector or cfg.sector,
         product=combo.product or cfg.product,
         resolution=combo.resolution or cfg.resolution,
+        source_kind=combo.source_kind or cfg.source_kind,
         crop_left=combo.crop_left,
         crop_top=combo.crop_top,
         crop_right=combo.crop_right,
@@ -669,6 +713,21 @@ def _geos_transformer(satellite: str) -> Transformer | None:
     return _geos_transformers[satellite]
 
 
+def _project_to_pixels(
+    transformer: Transformer, extent: tuple[float, float, float, float],
+    lons: np.ndarray, lats: np.ndarray, img_w: int, img_h: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Shared linear fraction-of-extent -> pixel math, used by both lonlat_to_pixels
+    (CONUS-only, _GEOS_AREA_CONUS lookup) and lonlat_to_pixels_area (any sector, real
+    AreaDefinition from a satpy_raw frame) -- projection-agnostic as long as the
+    source raster is a rectilinear GEOS-projected grid, which holds for both."""
+    x, y = transformer.transform(lons, lats)
+    x0, y0, x1, y1 = extent
+    col = (x - x0) / (x1 - x0) * img_w
+    row = (y1 - y) / (y1 - y0) * img_h
+    return col, row
+
+
 def lonlat_to_pixels(
     satellite: str, lons: np.ndarray, lats: np.ndarray, img_w: int, img_h: int
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -679,21 +738,53 @@ def lonlat_to_pixels(
     t = _geos_transformer(satellite)
     if t is None:
         return None
-    x, y = t.transform(lons, lats)
-    x0, y0, x1, y1 = _GEOS_AREA_CONUS[satellite]["extent"]
-    col = (x - x0) / (x1 - x0) * img_w
-    row = (y1 - y) / (y1 - y0) * img_h
-    return col, row
+    return _project_to_pixels(t, _GEOS_AREA_CONUS[satellite]["extent"], lons, lats, img_w, img_h)
 
 
-def draw_graticule(img: Image.Image, satellite: str, step_deg: float, color: tuple[int, int, int], opacity: int) -> Image.Image:
-    """Draw a lat/lon grid on img (must be the raw, untrimmed/uncropped CONUS frame —
-    see the pipeline-order note on overlay_* config fields)."""
+@dataclass(slots=True)
+class AreaInfo:
+    """Real georeferencing for one fetched frame, as reported by satpy's own
+    AreaDefinition -- the satpy_raw-path equivalent of a _GEOS_AREA_CONUS lookup,
+    but valid for any sector (Full Disk, Mesoscale), not just the two hand-calibrated
+    CONUS extents. Populated on FetchedFrame once a satpy_raw frame is actually
+    loaded; unknown before then, so it lives on the frame, not on EffectiveSource."""
+    proj4_params: dict[str, Any]
+    extent: tuple[float, float, float, float]
+
+
+_area_info_transformers: dict[tuple[float, ...], Transformer] = {}
+
+
+def lonlat_to_pixels_area(
+    area: AreaInfo, lons: np.ndarray, lats: np.ndarray, img_w: int, img_h: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Same math as lonlat_to_pixels, but sourced from a real AreaDefinition (any
+    sector) instead of the CONUS-only _GEOS_AREA_CONUS[satellite] lookup."""
+    cache_key = tuple(sorted(area.proj4_params.items()))
+    if cache_key not in _area_info_transformers:
+        crs = CRS.from_dict(area.proj4_params)
+        _area_info_transformers[cache_key] = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+    return _project_to_pixels(_area_info_transformers[cache_key], area.extent, lons, lats, img_w, img_h)
+
+
+def draw_graticule(
+    img: Image.Image, satellite: str, step_deg: float, color: tuple[int, int, int], opacity: int,
+    area: AreaInfo | None = None,
+) -> Image.Image:
+    """Draw a lat/lon grid on img (must be the raw, untrimmed/uncropped frame — see
+    the pipeline-order note on overlay_* config fields). Uses the real per-frame
+    `area` (any sector) when given, e.g. from a satpy_raw fetch; otherwise falls back
+    to the CONUS-only _GEOS_AREA_CONUS lookup keyed by `satellite`."""
     w, h = img.size
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     fill = (*color, opacity)
     line_width = max(1, round(w / _OVERLAY_REFERENCE_WIDTH_PX))  # a 1px line is invisible at 5000x3000+
+
+    def project(lons: np.ndarray, lats: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+        if area is not None:
+            return lonlat_to_pixels_area(area, lons, lats, w, h)
+        return lonlat_to_pixels(satellite, lons, lats, w, h)
 
     def draw_run(cols: np.ndarray, rows: np.ndarray) -> None:
         run: list[tuple[float, float]] = []
@@ -710,11 +801,11 @@ def draw_graticule(img: Image.Image, satellite: str, step_deg: float, color: tup
     lon_samples = np.arange(-180, 180.01, 0.5)
     lat_samples = np.arange(-85, 85.01, 0.5)
     for lat in np.arange(-80, 80.01, step_deg):
-        result = lonlat_to_pixels(satellite, lon_samples, np.full_like(lon_samples, lat), w, h)
+        result = project(lon_samples, np.full_like(lon_samples, lat))
         if result:
             draw_run(*result)
     for lon in np.arange(-180, 180.01, step_deg):
-        result = lonlat_to_pixels(satellite, np.full_like(lat_samples, lon), lat_samples, w, h)
+        result = project(np.full_like(lat_samples, lon), lat_samples)
         if result:
             draw_run(*result)
 
@@ -723,15 +814,18 @@ def draw_graticule(img: Image.Image, satellite: str, step_deg: float, color: tup
     return base.convert("RGB")
 
 
-def draw_city_markers(img: Image.Image, satellite: str, cities: tuple[CityMarker, ...], cfg: Config) -> Image.Image:
+def draw_city_markers(
+    img: Image.Image, satellite: str, cities: tuple[CityMarker, ...], cfg: Config,
+    area: AreaInfo | None = None,
+) -> Image.Image:
     """Draw labeled markers at each city's projected pixel position. Same
-    raw-frame-only requirement as draw_graticule."""
+    raw-frame-only requirement and area-lookup fallback as draw_graticule."""
     if not cities:
         return img
     w, h = img.size
     lons = np.array([c.lon for c in cities])
     lats = np.array([c.lat for c in cities])
-    result = lonlat_to_pixels(satellite, lons, lats, w, h)
+    result = lonlat_to_pixels_area(area, lons, lats, w, h) if area is not None else lonlat_to_pixels(satellite, lons, lats, w, h)
     if result is None:
         return img
     cols, rows = result
@@ -1038,28 +1132,41 @@ def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: Effecti
     return base.convert("RGB")
 
 
-def draw_overlays(img: Image.Image, cfg: Config, source: EffectiveSource) -> Image.Image:
+def draw_overlays(img: Image.Image, cfg: Config, source: EffectiveSource, area: AreaInfo | None = None) -> Image.Image:
     """Apply configured georeferenced overlays. Must run on the raw fetched frame,
     before trim_source_caption/crop_fractional/crop_to_screen — those change the pixel
-    grid the calibration above assumes."""
+    grid the calibration above assumes.
+
+    `area` is real per-frame georeferencing (only available for satpy_raw frames,
+    see FetchedFrame.area_info) -- when given, it's valid for any sector, and the
+    CONUS-only/_GEOS_AREA_CONUS-allowlist gate below doesn't apply to
+    overlay_graticule/overlay_cities (see draw_graticule/draw_city_markers, which
+    both take `area` too). Without it (the cdn_jpg path, which has no
+    georeferencing of its own), those two fall back to the hand-calibrated
+    CONUS-only lookup and its gate. overlay_shell_command/overlay_geojson_files
+    aren't area-aware yet -- they call lonlat_to_pixels(satellite, ...) directly
+    (see _draw_lonlat_run/_build_geojson_layer), so they stay CONUS-only regardless
+    of `area` and silently draw nothing on an unsupported sector/satellite rather
+    than erroring."""
     if not (cfg.overlay_graticule or cfg.overlay_cities or cfg.overlay_shell_command or cfg.overlay_geojson_files):
         return img
-    if source.sector != "CONUS":
-        logging.warning(
-            "[%s] Georeferenced overlays are only calibrated for CONUS (sector=%s); skipping",
-            source.name, source.sector,
-        )
-        return img
-    if source.satellite not in _GEOS_AREA_CONUS:
-        logging.warning(
-            "[%s] No overlay calibration for satellite=%s; skipping", source.name, source.satellite,
-        )
-        return img
+    if area is None:
+        if source.sector != "CONUS":
+            logging.warning(
+                "[%s] Georeferenced overlays are only calibrated for CONUS (sector=%s); skipping",
+                source.name, source.sector,
+            )
+            return img
+        if source.satellite not in _GEOS_AREA_CONUS:
+            logging.warning(
+                "[%s] No overlay calibration for satellite=%s; skipping", source.name, source.satellite,
+            )
+            return img
 
     if cfg.overlay_graticule:
-        img = draw_graticule(img, source.satellite, cfg.overlay_graticule_step_deg, cfg.overlay_graticule_color, cfg.overlay_graticule_opacity)
+        img = draw_graticule(img, source.satellite, cfg.overlay_graticule_step_deg, cfg.overlay_graticule_color, cfg.overlay_graticule_opacity, area)
     if cfg.overlay_cities:
-        img = draw_city_markers(img, source.satellite, cfg.overlay_cities, cfg)
+        img = draw_city_markers(img, source.satellite, cfg.overlay_cities, cfg, area)
     if cfg.overlay_geojson_files:
         try:
             img = render_static_geojson_overlay(img, cfg, source)
@@ -1088,28 +1195,44 @@ def draw_overlays(img: Image.Image, cfg: Config, source: EffectiveSource) -> Ima
 # Metadata
 # --------------------------------------------------------------------------- #
 
-def build_metadata(source: EffectiveSource, headers: dict[str, str], img: Image.Image) -> dict[str, Any]:
-    now = datetime.now(timezone.utc)
-    last_modified = headers.get("last-modified")
-    capture_time = parse_capture_time(headers)
+@dataclass(slots=True)
+class FetchedFrame:
+    """One fetched-and-decoded source frame, in the common shape both source_kinds
+    produce so the rest of the pipeline (build_metadata onward) doesn't need to know
+    which one fetched it. `extra_meta` carries kind-specific fields: http_etag/
+    http_last_modified/http_content_length for cdn_jpg, band_files for satpy_raw."""
+    image: Image.Image
+    capture_time_utc: str | None
+    source_kind: str
+    area_info: AreaInfo | None = None
+    extra_meta: dict[str, Any] = field(default_factory=dict)
 
-    return {
+
+def build_metadata(source: EffectiveSource, frame: FetchedFrame) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+
+    meta = {
         "combo": source.name,
         "satellite": source.satellite,
         "satellite_label": source.satellite_label(),
         "sector": source.sector,
         "sector_label": source.sector_label(),
-        "product": source.product,
-        "resolution_requested": source.resolution,
-        "source_url": source.image_url,
+        "product": source.product if frame.source_kind == "cdn_jpg" else "GeoColor (satpy_raw)",
+        "resolution_requested": source.resolution if frame.source_kind == "cdn_jpg" else "native",
         "downloaded_at_utc": now.isoformat(),
-        "capture_time_utc": capture_time,
-        "http_last_modified": last_modified,
-        "http_etag": headers.get("etag"),
-        "http_content_length": headers.get("content-length"),
-        "image_dimensions": list(img.size),
-        "image_format": img.format,
+        "capture_time_utc": frame.capture_time_utc,
+        "image_dimensions": list(frame.image.size),
+        "image_format": frame.image.format,
     }
+    if frame.source_kind == "cdn_jpg":
+        meta["source_url"] = source.image_url
+        meta["http_last_modified"] = frame.extra_meta.get("last-modified")
+        meta["http_etag"] = frame.extra_meta.get("etag")
+        meta["http_content_length"] = frame.extra_meta.get("content-length")
+    else:
+        meta["source_url"] = "s3://" + ", ".join(frame.extra_meta.get("band_files", []))
+        meta["download_bytes"] = frame.extra_meta.get("total_bytes")
+    return meta
 
 
 def embed_exif(img: Image.Image, meta: dict[str, Any]) -> Image.Image:
@@ -1282,6 +1405,69 @@ def maybe_apply_metered_resolution(cfg: Config, source: EffectiveSource, platfor
 # Core run
 # --------------------------------------------------------------------------- #
 
+def _fetch_cdn_jpg(
+    cfg: Config, session: requests.Session, source: EffectiveSource, sstate: dict[str, Any],
+) -> FetchedFrame | None:
+    """Today's default source_kind: NOAA STAR's pre-rendered JPG over HTTP."""
+    prev_etag = sstate.get("etag") if cfg.skip_if_unchanged else None
+    prev_capture_time = sstate.get("last_capture_time_utc")
+
+    started = time.monotonic()
+    result = fetch_fresh_image(
+        cfg, session, source.image_url, prev_etag, prev_capture_time,
+        started + cfg.max_fresh_wait_seconds,
+    )
+    elapsed = time.monotonic() - started
+    if result is None:
+        logging.info("[%s] No new image available", source.name)
+        return None
+
+    content, headers = result
+    logging.info("[%s] Downloaded %d bytes in %.2fs", source.name, len(content), elapsed)
+
+    img = Image.open(io.BytesIO(content))
+    img.load()
+    return FetchedFrame(
+        image=img,
+        capture_time_utc=parse_capture_time(headers),
+        source_kind="cdn_jpg",
+        extra_meta=headers,
+    )
+
+
+def _fetch_satpy_raw(cfg: Config, source: EffectiveSource, sstate: dict[str, Any]) -> FetchedFrame | None:
+    """source_kind = "satpy_raw": composite our own GeoColor from raw ABI L1b bands
+    (see source_satpy.py). Lazily imports source_satpy so the heavy satpy/pyresample/
+    s3fs dependencies are only required when this source_kind is actually used."""
+    import source_satpy
+
+    prev_scan_time = sstate.get("last_capture_time_utc") if cfg.skip_if_unchanged else None
+    started = time.monotonic()
+    try:
+        result = source_satpy.fetch_composite(
+            source.satellite, source.sector, prev_scan_time, cfg.data_dir / "satpy_raw_cache",
+        )
+    except source_satpy.SatpyUnavailableError as e:
+        logging.error("[%s] %s", source.name, e)
+        return None
+    elapsed = time.monotonic() - started
+    if result is None:
+        logging.info("[%s] No new satpy_raw composite available", source.name)
+        return None
+
+    logging.info(
+        "[%s] Composited satpy_raw frame in %.2fs (%d band files, %d bytes downloaded)",
+        source.name, elapsed, len(result.band_files), result.total_bytes,
+    )
+    return FetchedFrame(
+        image=result.image,
+        capture_time_utc=result.scan_time_utc,
+        source_kind="satpy_raw",
+        area_info=AreaInfo(proj4_params=result.proj4_params, extent=result.extent),
+        extra_meta={"band_files": result.band_files, "total_bytes": result.total_bytes},
+    )
+
+
 def fetch_and_render(
     cfg: Config,
     session: requests.Session,
@@ -1294,33 +1480,29 @@ def fetch_and_render(
     frame into a screen_size-sized final image + its metadata. Updates state in place
     (per-source ETag/capture-time/learned publish phase, keyed by source.key so
     unrelated sources sharing one config never mix up each other's freshness
-    tracking). Returns None if the source genuinely hasn't changed (304)."""
+    tracking). Returns None if the source genuinely hasn't changed (a cdn_jpg 304, or
+    the satpy_raw equivalent -- same scan time as last cycle)."""
     source = maybe_apply_metered_resolution(cfg, source, platform)
     sstate = state.setdefault("sources", {}).setdefault(source.key, {})
-    prev_etag = sstate.get("etag") if cfg.skip_if_unchanged else None
     prev_capture_time = sstate.get("last_capture_time_utc")
 
-    started = time.monotonic()
-    result = fetch_fresh_image(
-        cfg, session, source.image_url, prev_etag, prev_capture_time,
-        started + cfg.max_fresh_wait_seconds,
-    )
-    elapsed = time.monotonic() - started
-
-    if result is None:
-        logging.info("[%s] No new image available", source.name)
+    if source.source_kind == "cdn_jpg":
+        frame = _fetch_cdn_jpg(cfg, session, source, sstate)
+    elif source.source_kind == "satpy_raw":
+        frame = _fetch_satpy_raw(cfg, source, sstate)
+    else:
+        raise ValueError(f"Unknown source_kind: {source.source_kind!r}")
+    if frame is None:
         return None
 
-    content, headers = result
-    logging.info("[%s] Downloaded %d bytes in %.2fs", source.name, len(content), elapsed)
+    with frame.image as img:
+        meta = build_metadata(source, frame)
 
-    with Image.open(io.BytesIO(content)) as img:
-        img.load()
-        meta = build_metadata(source, headers, img)
+        img = draw_overlays(img, cfg, source, frame.area_info)
 
-        img = draw_overlays(img, cfg, source)
-
-        if cfg.trim_source_caption:
+        # NOAA's baked caption strip is a cdn_jpg-only artifact -- a satpy_raw
+        # composite never has one to trim.
+        if source.source_kind == "cdn_jpg" and cfg.trim_source_caption:
             img = trim_source_caption(img, cfg.trim_source_caption_frac)
 
         img = crop_fractional(img, source.crop_left, source.crop_top, source.crop_right, source.crop_bottom)
@@ -1335,13 +1517,24 @@ def fetch_and_render(
 
         img = embed_exif(img, meta)
 
-    sstate["etag"] = headers.get("etag")
+    if source.source_kind == "cdn_jpg":
+        sstate["etag"] = frame.extra_meta.get("etag")
     if meta["capture_time_utc"]:
         if meta["capture_time_utc"] != prev_capture_time:
             update_capture_phase(cfg, sstate, meta["capture_time_utc"])
         sstate["last_capture_time_utc"] = meta["capture_time_utc"]
 
     return img, meta
+
+
+def _write_render_to(path: Path, img: Image.Image, label: str = "") -> None:
+    """See Config.render_to's docstring: save a rendered frame for inspection
+    without applying it as the wallpaper."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_kwargs = {"exif": img.info.get("exif", b"")} if path.suffix.lower() in (".jpg", ".jpeg") else {}
+    img.save(path, **save_kwargs)
+    prefix = f"[{label}] " if label else ""
+    logging.info("%sRendered frame saved to %s (--render-to set, wallpaper not applied)", prefix, path)
 
 
 def run_once(cfg: Config, session: requests.Session, platform: WallpaperPlatform) -> bool:
@@ -1368,8 +1561,11 @@ def run_once(cfg: Config, session: requests.Session, platform: WallpaperPlatform
     cfg.metadata_path.write_text(json.dumps(meta, indent=2))
     logging.info("Saved wallpaper + metadata to %s", cfg.data_dir)
 
-    platform.apply_wallpaper(cfg.wallpaper_path, cfg.wallpaper_style)
-    logging.info("Wallpaper applied (style=%s)", cfg.wallpaper_style)
+    if cfg.render_to:
+        _write_render_to(cfg.render_to, img)
+    else:
+        platform.apply_wallpaper(cfg.wallpaper_path, cfg.wallpaper_style)
+        logging.info("Wallpaper applied (style=%s)", cfg.wallpaper_style)
 
     state["last_applied_utc"] = datetime.now(timezone.utc).isoformat()
     save_state(cfg, state)
@@ -1404,8 +1600,11 @@ def run_once_rotate(cfg: Config, session: requests.Session, platform: WallpaperP
     cfg.metadata_path.write_text(json.dumps(meta, indent=2))
     logging.info("[%s] Saved wallpaper + metadata to %s", combo.name, cfg.data_dir)
 
-    platform.apply_wallpaper(cfg.wallpaper_path, cfg.wallpaper_style)
-    logging.info("[%s] Wallpaper applied (style=%s)", combo.name, cfg.wallpaper_style)
+    if cfg.render_to:
+        _write_render_to(cfg.render_to, img, combo.name)
+    else:
+        platform.apply_wallpaper(cfg.wallpaper_path, cfg.wallpaper_style)
+        logging.info("[%s] Wallpaper applied (style=%s)", combo.name, cfg.wallpaper_style)
 
     state["combo_rotation_index"] = (index + 1) % len(cfg.combos)
     state["last_applied_utc"] = datetime.now(timezone.utc).isoformat()
@@ -1449,7 +1648,11 @@ def run_once_per_monitor(cfg: Config, session: requests.Session, platform: Wallp
         assignments[monitor.id] = out_path
         logging.info("[%s] Rendered for monitor %d (%s)", combo.name, i, monitor.id)
 
-    if assignments:
+        if cfg.render_to:
+            render_path = cfg.render_to.with_stem(f"{cfg.render_to.stem}_monitor{i}")
+            _write_render_to(render_path, img, combo.name)
+
+    if assignments and not cfg.render_to:
         platform.apply_wallpaper_per_monitor(assignments, cfg.wallpaper_style)
         for i, monitor in enumerate(monitors):
             if monitor.id in assignments:
@@ -1510,6 +1713,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--product", help="e.g. GEOCOLOR")
     p.add_argument("--resolution", help='e.g. "2500x1500" or "latest"')
     p.add_argument("--data-dir", type=Path, dest="data_dir")
+    p.add_argument(
+        "--render-to", type=Path, dest="render_to",
+        help="Also save the rendered frame(s) to this path and skip applying them as "
+             "the desktop wallpaper (for testing a render without touching the real "
+             "wallpaper). With combo_mode = \"per_monitor\", writes one file per "
+             "monitor with `_monitor{i}` inserted before the extension.",
+    )
     p.add_argument("--wallpaper-style", choices=list(WALLPAPER_STYLE_NAMES), dest="wallpaper_style")
     p.add_argument("--no-crop", action="store_const", const=False, dest="crop_to_screen")
     p.add_argument("--no-info-block", action="store_const", const=False, dest="info_block")
@@ -1532,6 +1742,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     cfg = load_config(args.config, overrides)
     validate_combos(cfg)
+    validate_source_kind(cfg)
     setup_logging(cfg)
 
     platform = get_platform()

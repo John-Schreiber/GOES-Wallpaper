@@ -66,3 +66,34 @@ def test_satellite_and_sector_labels_fall_back_to_raw_code():
     unknown = gw.resolve_source(gw.Config(satellite="GOES99", sector="ZZ"), None)
     assert unknown.satellite_label() == "GOES99"
     assert unknown.sector_label() == "ZZ"
+
+
+def test_resolve_source_default_uses_top_level_source_kind():
+    source = gw.resolve_source(gw.Config(source_kind="satpy_raw"), None)
+    assert source.source_kind == "satpy_raw"
+
+
+def test_resolve_source_combo_source_kind_overrides_config():
+    cfg = gw.Config(source_kind="cdn_jpg")
+    combo = gw.Combo(name="raw", source_kind="satpy_raw")
+    source = gw.resolve_source(cfg, combo)
+    assert source.source_kind == "satpy_raw"
+
+
+def test_resolve_source_combo_falls_back_to_config_source_kind():
+    cfg = gw.Config(source_kind="satpy_raw")
+    combo = gw.Combo(name="c")  # source_kind unset
+    source = gw.resolve_source(cfg, combo)
+    assert source.source_kind == "satpy_raw"
+
+
+def test_effective_source_key_ignores_product_resolution_for_satpy_raw():
+    cfg = gw.Config(satellite="GOES18", sector="CONUS", source_kind="satpy_raw")
+    source = gw.resolve_source(cfg, None)
+    assert source.key == "GOES18/CONUS/satpy_raw"
+
+
+def test_effective_source_key_still_includes_product_resolution_for_cdn_jpg():
+    cfg = gw.Config(satellite="GOES18", sector="CONUS", product="GEOCOLOR", resolution="5000x3000")
+    source = gw.resolve_source(cfg, None)
+    assert source.key == "GOES18/CONUS/GEOCOLOR/5000x3000"

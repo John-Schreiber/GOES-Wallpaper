@@ -59,3 +59,22 @@ def test_east_and_west_satellites_give_different_pixel_positions_for_same_point(
     col_w, row_w = gw.lonlat_to_pixels("GOES18", np.array([lon]), np.array([lat]), 2500, 1500)
     col_e, row_e = gw.lonlat_to_pixels("GOES19", np.array([lon]), np.array([lat]), 2500, 1500)
     assert (col_w[0], row_w[0]) != (col_e[0], row_e[0])
+
+
+def test_lonlat_to_pixels_area_matches_lonlat_to_pixels_for_equivalent_area():
+    """lonlat_to_pixels_area (satpy_raw path, any sector) reuses the same linear
+    fraction-of-extent math as lonlat_to_pixels (cdn_jpg path, CONUS only) -- feeding
+    it the same proj4/extent GOES-18 uses should reproduce identical pixel positions
+    for the already-validated landmarks above, without needing a separate real
+    satpy-derived fixture."""
+    lon, lat, expected_col, expected_row = KNOWN_LANDMARKS[("GOES18", "SF")]
+    area = gw.AreaInfo(
+        proj4_params={
+            "proj": "geos", "sweep": "x", "lon_0": -137.0, "h": 35786023,
+            "x_0": 0, "y_0": 0, "ellps": "GRS80", "units": "m",
+        },
+        extent=(-2505021.61, 1583173.65752, 2505021.61, 4589199.58952),
+    )
+    col, row = gw.lonlat_to_pixels_area(area, np.array([lon]), np.array([lat]), 2500, 1500)
+    assert col[0] == pytest.approx(expected_col, abs=0.5)
+    assert row[0] == pytest.approx(expected_row, abs=0.5)
