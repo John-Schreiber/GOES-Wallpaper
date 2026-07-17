@@ -12,6 +12,7 @@ time.
 [Requirements](#requirements) · [Setup](#setup) · [Configuration](#configuration) ·
 [Multi-source combos](#multi-source-combos) ·
 [Georeferenced overlays](#georeferenced-overlays) ·
+[Custom raw-data source (satpy_raw)](#custom-raw-data-source-satpy_raw) ·
 [Power/network-aware fallbacks](#powernetwork-aware-fallbacks) ·
 [Cross-platform](#cross-platform) · [Freshness sync](#freshness-sync) ·
 [Running periodically](#running-periodically) ·
@@ -90,6 +91,9 @@ inline comment; the highlights:
   625x375 up to 10000x6000 native; Full Disk differs: 1808x1808 up to 10848x10848).
   Default is `5000x3000` so a full-frame crop already covers a 4K monitor without
   upsampling blur — bump higher if you crop aggressively via `source_crop_*`/combos.
+* **`source_kind`** — `"cdn_jpg"` (default, the above) or `"satpy_raw"` (composite our
+  own image from raw satellite data instead, no NOAA annotations — heavier, opt-in,
+  needs an extra install). See "Custom raw-data source (satpy_raw)" below.
 * **Screen handling** — `crop_to_screen` does a Lanczos resize + center-crop ("cover"
   style) so the image exactly fills your screen without Windows' own lower-quality
   scaling; `crop_anchor` biases where the crop is taken from; `span_all_monitors` crops
@@ -162,8 +166,85 @@ overlay on a non-CONUS sector logs a warning and skips drawing rather than rende
 something misplaced.
 
 This adds content on top — it doesn't and can't remove NOAA's own baked-in state
-lines/logo (see "Source image caveats" below for why). Marker/line sizes are tuned for
-a ~2000px-wide frame and scale up automatically at higher `resolution` settings.
+lines/logo (see "Source image caveats" below for why) *for the default `cdn_jpg`
+source_kind*. See the next section for a source that does remove them.
+
+Marker/line sizes are tuned for a ~2000px-wide frame and scale up automatically at
+higher `resolution` settings. With `source_kind = "satpy_raw"`, overlays work on any
+sector, not just CONUS — see below.
+
+## Custom raw-data source (satpy_raw)
+
+`source_kind = "satpy_raw"` fetches raw ABI L1b radiance bands directly from the
+public `noaa-goes16`/`noaa-goes18`/`noaa-goes19` S3 buckets (anonymous access, no
+credentials needed) and composites a GeoColor image locally with
+[satpy](https://satpy.readthedocs.io/), instead of fetching NOAA STAR's
+pre-rendered JPG. Unlike the default `cdn_jpg` source, this has **no baked-in state
+lines, logo, or fake city lights** — there's nothing to remove because we're
+building the image ourselves — and it exposes the real projection/area info
+directly, so [georeferenced overlays](#georeferenced-overlays) work accurately on
+Full Disk and Mesoscale sectors too, not just CONUS. See
+[CUSTOM_IMAGERY_PLAN.md](CUSTOM_IMAGERY_PLAN.md) for the full design rationale.
+
+Install the extra it needs (not part of the default install — these are heavy
+geospatial libraries most users don't need):
+
+```powershell
+uv sync --extra satpy-raw
+# or: pip install goes-wallpaper[satpy-raw]
+```
+
+Then set, top-level or per-combo:
+
+```toml
+source_kind = "satpy_raw"
+satellite = "GOES18"
+sector = "CONUS"   # CONUS, FD, M1, or M2
+```
+
+`product` and `resolution` are ignored for this source_kind — satpy always builds
+a GeoColor-style composite from a fixed band set (C01/C02/C03/C13); there's no
+NOAA product code or JPG size tier equivalent. `metered_resolution` is similarly a
+no-op here (no smaller-tier download exists for raw bands).
+
+**Status**: first cut, opt-in alongside the default `cdn_jpg` source (not a
+replacement) — no automatic fallback to `cdn_jpg` if a raw fetch fails, and no
+cross-cycle caching of downloaded band files (each cycle re-downloads into
+`<data_dir>/satpy_raw_cache`). Verified end to end against live GOES-18 data for
+both CONUS and Full Disk: real S3 listing/download, real compositing (including the
+day/night blend below, confirmed against a real terminator), and the full
+crop/info-block/EXIF pipeline producing a correct final image with no NOAA
+annotations.
+
+**Night side**: not GEOCOLOR-style synthetic city lights, by design (those come
+from a static VIIRS composite, not real-time data — see CUSTOM_IMAGERY_PLAN.md).
+Instead, `source_satpy.py` builds its own day/night blend: true-color by day, a
+muted navy-to-pale-lavender color mapped from Band 13 (clean IR window) brightness
+temperature by night, blended at the real per-pixel solar terminator — a
+deliberately photographic/moonlit feel rather than a false-color IR product or
+flat darkness. (This also sidesteps satpy's stock `geo_color` composite, whose
+night layer depends on a NASA-hosted Black Marble file that currently 404s — an
+external outage outside our control, not something this path relies on.) Real
+VIIRS Day/Night Band city lights would be a genuine future upgrade over this — see
+CUSTOM_IMAGERY_PLAN.md's backlog.
+
+**Bandwidth and compute cost — read before enabling on a `--loop` interval.**
+This is a fundamentally heavier source than `cdn_jpg`'s single small JPG fetch
+(~2-9MB observed for CONUS in this session): every cycle downloads four raw band
+files and composites them locally, with no cross-cycle caching in v1. A live
+GOES-18 CONUS fetch measured **~98MB** for the four bands, and Full Disk is
+considerably more (Band 2 alone was ~405MB natively in one live fetch). Every
+fetch logs the actual downloaded byte count (`source_satpy.fetch_composite`'s
+"Downloaded %d bytes" line) — watch it before committing to a schedule. Compositing
+itself is done at a downsampled resolution (not each band's full native resolution
+— see `_COMPOSITE_TARGET_WIDTH_PX` in `source_satpy.py`) to keep compute
+reasonable, which brought a single composite down to roughly 22s for CONUS and 45s
+for Full Disk in testing — but that only helps compute, not the download, which
+still has to pull each band at full native resolution first. Think carefully
+before enabling `satpy_raw` at a tight `interval_minutes`, especially for Full
+Disk, and especially on a metered/limited connection — `metered_resolution` can't
+help here (see above). Test with `--render-to` (see "Tests" below) before
+committing to a `--loop` schedule.
 
 `overlay_geojson_files` takes a list of local GeoJSON file paths — for content that
 doesn't change cycle to cycle (state/county borders, a coastline layer, a fixed set of
@@ -337,6 +418,10 @@ can't hang the task for most of a cycle if your trigger interval doesn't match
 
 ## Source image caveats
 
+These apply to the default `source_kind = "cdn_jpg"`, which fetches NOAA STAR's
+already-rendered JPG. `source_kind = "satpy_raw"` (see above) doesn't have any of
+these, since it composites the image from raw bands itself instead.
+
 NOAA STAR's CDN bakes some things into the image pixels themselves, which this script
 can't strip out — checked directly against GEOCOLOR, Band 02 (visible), and Band 13
 (Clean IR) for the CONUS sector:
@@ -380,7 +465,20 @@ tests against real city landmarks — see `tests/test_geolocation.py`'s docstrin
 what that test does and doesn't prove). No real network access or Windows APIs
 required — platform-specific behavior is tested through a fake `WallpaperPlatform`
 stub (`tests/test_power_network_fallback.py`), the same pattern used to develop the
-power/network-aware fallbacks in the first place.
+power/network-aware fallbacks in the first place. `tests/test_source_satpy.py` covers
+`source_kind = "satpy_raw"`'s pure band/scan-selection logic without needing the
+`satpy-raw` extra installed; real S3/satpy exercise is manual-only (see above).
+
+To manually inspect a real render (either source_kind) without touching your actual
+desktop wallpaper, use `--render-to`:
+
+```powershell
+uv run python goes_wallpaper.py --render-to test_render.jpg
+```
+
+This runs one full fetch/crop/overlay/info-block cycle and saves the result to the
+given path, skipping `platform.apply_wallpaper(...)` entirely — useful for checking a
+new `source_kind`, overlay, or crop setting looks right before enabling it for real.
 
 ## Contributing
 

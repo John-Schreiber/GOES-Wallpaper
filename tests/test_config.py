@@ -171,3 +171,28 @@ class TestValidateCombos:
     def test_rotate_does_not_require_monitor(self):
         cfg = gw.Config(combo_mode="rotate", combos=(gw.Combo(name="a"), gw.Combo(name="b")))
         gw.validate_combos(cfg)  # no raise
+
+
+class TestValidateSourceKind:
+    def test_default_is_valid(self):
+        gw.validate_source_kind(gw.Config())  # no raise
+
+    def test_satpy_raw_is_valid(self):
+        gw.validate_source_kind(gw.Config(source_kind="satpy_raw"))  # no raise
+
+    def test_bogus_top_level_source_kind_raises(self):
+        with pytest.raises(ValueError, match="source_kind must be one of"):
+            gw.validate_source_kind(gw.Config(source_kind="bogus"))
+
+    def test_combo_source_kind_none_is_ignored(self):
+        cfg = gw.Config(combos=(gw.Combo(name="a"),))
+        gw.validate_source_kind(cfg)  # no raise
+
+    def test_combo_source_kind_valid_passes(self):
+        cfg = gw.Config(combos=(gw.Combo(name="a", source_kind="satpy_raw"),))
+        gw.validate_source_kind(cfg)  # no raise
+
+    def test_bogus_combo_source_kind_raises(self):
+        cfg = gw.Config(combos=(gw.Combo(name="a", source_kind="bogus"),))
+        with pytest.raises(ValueError, match=r"combos\['a'\].source_kind must be one of"):
+            gw.validate_source_kind(cfg)

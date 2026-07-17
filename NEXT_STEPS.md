@@ -7,7 +7,9 @@ for forward-looking notes and open questions, not a second copy of the changelog
 
 For removing NOAA's baked-in state lines/city lights and adding custom overlays from
 raw satellite data — a separate, bigger initiative than anything below — see
-[CUSTOM_IMAGERY_PLAN.md](CUSTOM_IMAGERY_PLAN.md).
+[CUSTOM_IMAGERY_PLAN.md](CUSTOM_IMAGERY_PLAN.md). A first cut (Option B,
+`source_kind = "satpy_raw"`) has landed; see that doc for what's done vs. still
+open.
 
 ## Verification notes worth knowing
 
@@ -55,8 +57,11 @@ A few non-obvious things learned while building and testing this, not really
    and doesn't use capture-time-sync scheduling (no single "the" source to learn a
    phase from when several are fetched per cycle — falls back to plain
    clock-boundary alignment). Worth revisiting if precise timing matters here too.
-5. **`CUSTOM_IMAGERY_PLAN.md`'s Option B (satpy raw-composite) is explicitly
-   deferred**, not abandoned.
+5. ~~**`CUSTOM_IMAGERY_PLAN.md`'s Option B (satpy raw-composite) is explicitly
+   deferred**, not abandoned.~~ Done: its first cut (`source_kind = "satpy_raw"`)
+   has landed — see that doc's status section for what's verified vs. still open
+   (sustained-`--loop` bandwidth/compute cost, the B/A hybrid fallback, real VIIRS
+   night-lights).
 6. ~~**Overlay line support** (not just points/markers).~~ Done:
    `overlay_shell_command`/`overlay_geojson_files` + `_build_geojson_layer`
    (`goes_wallpaper.py`) draw `LineString`/`Polygon`/`Multi*` GeoJSON features

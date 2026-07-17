@@ -19,6 +19,37 @@ dependencies = [
     "winrt-windows-system-power>=3.2.1; sys_platform == 'win32'",
 ]
 
+[project.optional-dependencies]
+# Powers source_kind = "satpy_raw" (see source_satpy.py, CUSTOM_IMAGERY_PLAN.md):
+# composites our own GeoColor from raw ABI L1b bands instead of fetching NOAA STAR's
+# pre-rendered JPG. Not needed for the default cdn_jpg source_kind, kept optional so
+# the base install stays light.
+satpy-raw = [
+    "satpy[abi_l1b]",
+    "pyresample",
+    "xarray",
+    "dask[array]",
+    "trollimage",
+    "s3fs",
+    # satpy's abi_l1b reader opens NetCDF4 files via xarray's h5netcdf backend, which
+    # needs h5py itself (h5netcdf doesn't vendor/pull it in) -- satpy[abi_l1b] alone
+    # installs cleanly but fails at read time with "No module named 'h5py'" without
+    # this. Found by actually running fetch_composite() against a live scan, not by
+    # reading satpy's dependency metadata.
+    "h5py",
+    # geo_color's daytime true_color layer applies rayleigh_corrected/sunz_corrected
+    # modifiers to C01/C02/C03, which need pyspectral for the atmospheric-correction
+    # math -- also only surfaced by actually running the composite, not listed as a
+    # hard dependency of satpy[abi_l1b].
+    "pyspectral",
+    # geo_color's low-cloud detection layer auto-downloads a static land/water mask
+    # GeoTIFF (satpy.composites.aux_data.StaticImageCompositor) and reads it via
+    # satpy's generic_image reader, which needs both rasterio and rioxarray -- again
+    # only surfaced by actually running the composite end to end.
+    "rasterio",
+    "rioxarray",
+]
+
 [project.scripts]
 goes-wallpaper = "goes_wallpaper:main"
 
@@ -40,4 +71,4 @@ testpaths = ["tests"]
 # platform_windows as top-level sibling modules (not relative/package-qualified), so
 # all three need to land next to each other in the wheel, matching how they sit in
 # the repo.
-include = ["goes_wallpaper.py", "platform_base.py", "platform_windows.py"]
+include = ["goes_wallpaper.py", "platform_base.py", "platform_windows.py", "source_satpy.py"]
