@@ -83,7 +83,7 @@ Skip the build step entirely by grabbing the wheel from the
 instead of cloning the repo:
 
 ```powershell
-uv tool install https://github.com/John-Schreiber/GOES-Wallpaper/releases/download/v2.0.0/goes_wallpaper-2.0.0-py3-none-any.whl
+uv tool install https://github.com/John-Schreiber/GOES-Wallpaper/releases/download/v2.2.0/goes_wallpaper-2.2.0-py3-none-any.whl
 goes-wallpaper --config path\to\config.toml
 ```
 
@@ -234,6 +234,18 @@ Caveat: `cdn_jpg`'s baked-in NOAA captions/state borders warp along with everyth
 else near the projection's edges, since they can't be distinguished from the rest of
 the image (see "Source image caveats" below) — this is most noticeable in
 `"orthographic"`/`"lambertazimuthal"` near the limb of the globe.
+
+Quality caveat: reprojection is nearest-neighbor only (no smoothing/anti-aliasing),
+so the valid-data/black boundary in `"orthographic"`/`"lambertazimuthal"` renders
+visibly jagged rather than a clean curve — see the gallery in
+[PROJECTIONS.md](PROJECTIONS.md). It also runs *after* `overlay_*` is drawn (not
+before), so graticule lines, city markers/labels, and GeoJSON overlays get warped
+along with the base image instead of being redrawn cleanly in the destination
+projection — thin lines can break into dashed/patchy pixels and text labels can
+shear, worst near the projection's edges (same region the caveat above already
+flags). `"lambertconformal"`/`"platecarree"`, being close to the source projection
+over a CONUS-sized box, show this least. See `NEXT_STEPS.md` for the tracked
+follow-up.
 
 ## Custom raw-data source (satpy_raw)
 
@@ -409,6 +421,11 @@ OS-specific code in it; `platform_base.get_platform()` picks a backend automatic
 from `sys.platform` (Windows) or `XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP`
 containing `"kde"` (Linux) and raises `NotImplementedError` for any other Linux
 desktop environment.
+
+Set `platform` in config.toml (`"auto"` default, or explicit `"windows"`/`"kde"`) to
+short-circuit that detection — e.g. a Plasma session where `XDG_CURRENT_DESKTOP`
+isn't set the way Plasma normally sets it, or for testing a specific backend. No CLI
+flag for this yet; config.toml only.
 
 ### KDE Plasma backend
 

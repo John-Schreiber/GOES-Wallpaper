@@ -342,7 +342,7 @@ class Config:
     max_retries: int = 5
     backoff_factor: float = 1.5
     retry_statuses: tuple[int, ...] = (429, 500, 502, 503, 504)
-    user_agent: str = "goes-wallpaper/2.0 (+https://github.com/pjlhjr/GOES-Wallpaper)"
+    user_agent: str = "goes-wallpaper/2.2 (+https://github.com/John-Schreiber/GOES-Wallpaper)"
 
     # Scheduling (only used with --loop)
     loop: bool = False

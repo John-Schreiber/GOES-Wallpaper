@@ -94,9 +94,8 @@ addressing or keeping in mind:
 - **GitHub Actions are pinned by tag** (`actions/checkout@v4`, `astral-sh/setup-uv@v5`),
   not commit SHA. Tag-pinning trusts the action repo not to move the tag; SHA-pinning
   is the standard hardening if supply-chain risk matters here.
-- **`user_agent` still points at the upstream repo** (`+https://github.com/pjlhjr/...`).
-  Not a vulnerability, but the point of a contact URL in a UA string is that NOAA can
-  reach the operator — it should point at this fork.
+- ~~**`user_agent` still points at the upstream repo**~~ Done: now points at this
+  fork (`+https://github.com/John-Schreiber/GOES-Wallpaper`).
 
 ## Verification notes worth knowing
 
@@ -346,16 +345,25 @@ A few non-obvious things learned while building and testing this, not really
     config change. Full-frame RGBA PNGs at 5000x3000 aren't tiny — a cheap fix is
     deleting cache files whose `.json` sidecar hasn't matched in N days, or capping
     the count. Fold into whatever cache shape gap 16's per-combo work lands on.
-20. **Platform selection is hardcoded, not configurable.** `platform_base.
-    get_platform()` picks a backend purely from `sys.platform` plus (on Linux)
-    sniffing `XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP` for `"kde"`. That sniffing
-    is a real gap now that a second backend exists: it breaks for anyone running
-    Plasma without those env vars set correctly (some display managers/session
-    types don't populate them reliably), and there's no way to force a backend for
-    testing or an unusual setup (e.g. a KDE session where `XDG_CURRENT_DESKTOP`
-    reports something else, or the reverse — forcing the KDE backend under a
-    KDE-compatible-but-differently-labeled session). Worth adding a `platform`
-    override in `config.toml`/CLI (`"auto"` default preserving today's detection,
-    plus explicit `"windows"`/`"kde"` values) that short-circuits
-    `get_platform()`'s sniffing — same shape as `width_override`/`height_override`
-    already short-circuiting screen-size autodetection.
+20. ~~**Platform selection is hardcoded, not configurable.**~~ Done: `platform`
+    config setting (`"auto"` default, or explicit `"windows"`/`"kde"`) short-circuits
+    `get_platform()`'s `sys.platform`/`XDG_CURRENT_DESKTOP` sniffing. config.toml
+    only — no CLI flag yet.
+21. **Reprojection (`output_projection`) is low quality: nearest-neighbor only, and
+    warps already-drawn overlays instead of redrawing them.** Two related issues in
+    `reproject_frame`, both visible in `PROJECTIONS.md`'s gallery:
+    - No anti-aliasing at the valid-data/black boundary in `"orthographic"`/
+      `"lambertazimuthal"` — renders visibly stair-stepped rather than a clean curve.
+    - `draw_overlays` (graticule, city markers/labels, GeoJSON/shell-command
+      features) runs *before* `reproject_frame` in the fetch pipeline, so overlay
+      pixels get dragged through the same nearest-neighbor warp as the base image
+      instead of being reprojected as geometry — thin lines can break into dashed
+      segments, markers can distort, text can shear, worst near the projection's
+      edges. `lambertconformal`/`platecarree` over a CONUS-sized box barely show
+      this; `orthographic`/`lambertazimuthal` show it the most.
+    Cheapest fix: supersample (render larger, downsample with antialiasing after
+    reprojecting) — helps both issues without restructuring the pipeline. More
+    thorough fix: reproject overlay *geometry* (lon/lat → destination-projection
+    pixels) directly instead of warping pixels already drawn in the source grid —
+    would also want `pyresample`/similar for the base-image resampling at that
+    point, since it'd be adding a real dependency anyway.

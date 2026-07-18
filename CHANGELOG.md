@@ -2,7 +2,7 @@
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [2.2.0] — 2026-07-18 — KDE Plasma backend, reprojection, lon/lat crop
 
 ### Added
 - Georeferenced overlays (`overlay_graticule`, `overlay_cities`, `overlay_geojson_files`,
@@ -34,7 +34,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   dependency — so this works for both the default `cdn_jpg` source (CONUS/Full Disk)
   and `satpy_raw` (any sector, via its real per-frame georeferencing). See
   [PROJECTIONS.md](PROJECTIONS.md) for example renders of each. Pixels outside
-  the visible hemisphere in `"orthographic"` render black.
+  the visible hemisphere in `"orthographic"` render black. First cut: nearest-neighbor
+  only (no anti-aliasing at the valid-data edge), and `overlay_*` content is warped
+  along with the base image rather than redrawn in the destination projection — see
+  PROJECTIONS.md's "Known quality limitations" section.
 - KDE Plasma backend (`platform_linux_kde.KDEPlatform`), auto-selected on Linux when
   `XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP` contains `"kde"`. Implements the full
   `WallpaperPlatform` interface via Plasma's D-Bus scripting interface and the

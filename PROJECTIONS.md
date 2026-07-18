@@ -101,3 +101,30 @@ output_projection_center_lat = 37.0
 All four non-native projections work identically for the default `cdn_jpg` source
 (CONUS/Full Disk only) and `source_kind = "satpy_raw"` (any sector) — see
 `reproject_frame` in `goes_wallpaper.py`.
+
+## Known quality limitations
+
+`reproject_frame` is pure nearest-neighbor resampling (`pyproj`/`numpy` only, no
+`pyresample`/`satpy` dependency) — cheap and dependency-free, but visibly rougher
+than a real resampling library in two ways:
+
+* **Jagged valid-data edges.** Look closely at the `orthographic`/`lambertazimuthal`
+  renders above — the boundary between real content and the black "no data" margin
+  is stair-stepped, not a clean curve. There's no anti-aliasing at that boundary.
+* **Overlays get warped, not redrawn.** `overlay_graticule`/`overlay_cities`/
+  `overlay_geojson_files`/`overlay_shell_command` all draw onto the source image's
+  native GEOS pixel grid *before* `reproject_frame` runs (see the fetch pipeline in
+  `goes_wallpaper.py`), so their pixels get dragged through the same nearest-neighbor
+  warp as everything else instead of being reprojected as geometry. Thin graticule/
+  GeoJSON lines can break into dashed, patchy segments; city-marker circles can
+  distort; text labels can shear — worst near the projection's edges, where the
+  per-pixel distortion is largest. `lambertconformal`/`platecarree` over a
+  CONUS-sized box are close enough to the source projection that this is barely
+  visible; `orthographic`/`lambertazimuthal` show it the most.
+
+Both are tracked as a follow-up in `NEXT_STEPS.md` rather than fixed here — cheapest
+likely fix is supersampling (render at higher resolution, downsample with
+antialiasing after reprojecting); the more thorough fix is reprojecting overlay
+*geometry* directly into the destination projection instead of warping already-drawn
+pixels, which would also need `pyresample`/similar for the base-image resampling to
+be worth doing at the same time.
