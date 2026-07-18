@@ -335,14 +335,16 @@ gracefully on hardware/platforms that can't detect it — unknown is always trea
 OS-specific operations (applying the wallpaper, screen/monitor detection, taskbar/dock
 avoidance, battery/network-cost detection) live behind `platform_base.WallpaperPlatform`,
 implemented by `platform_windows.WindowsPlatform`, `platform_linux_kde.KDEPlatform`,
-and `platform_macos.MacOSPlatform`. `goes_wallpaper.py` itself — the fetch/crop/
-overlay/combo/scheduling logic — has no OS-specific code in it; `platform_base.
-get_platform()` picks a backend automatically from `sys.platform` (Windows, macOS) or
-`XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP` containing `"kde"` (Linux) and raises
-`NotImplementedError` for any other Linux desktop environment.
+`platform_macos.MacOSPlatform`, and `platform_render.RenderOnlyPlatform`.
+`goes_wallpaper.py` itself — the fetch/crop/overlay/combo/scheduling logic — has no
+OS-specific code in it; `platform_base.get_platform()` picks a backend automatically
+from `sys.platform` (Windows, macOS) or `XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP`
+containing `"kde"` (Linux) and raises `NotImplementedError` for any other Linux
+desktop environment. `render` is never auto-selected — see "Render-only backend"
+below.
 
 Set `platform` in config.toml (`"auto"` default, or explicit `"windows"`/`"kde"`/
-`"macos"`) to short-circuit that detection — e.g. a Plasma session where
+`"macos"`/`"render"`) to short-circuit that detection — e.g. a Plasma session where
 `XDG_CURRENT_DESKTOP` isn't set the way Plasma normally sets it, or for testing a
 specific backend. No CLI flag for this yet; config.toml only.
 
@@ -404,6 +406,23 @@ Known limitations:
   `get_power_state`'s `pmset -g batt` parsing on battery are still only covered by
   the unit tests' mocked output, not live multi-monitor/battery hardware — see
   `NEXT_STEPS.md` item 22 for specifics.
+
+### Render-only backend
+
+`platform_render.RenderOnlyPlatform` (`platform = "render"`) targets headless boxes with
+no desktop shell at all — a server, a container, an SSH session, CI — where the goal is
+just the rendered image(s) (typically via `render_to`), never a desktop wallpaper.
+`apply_wallpaper`/`apply_wallpaper_per_monitor` are no-ops (they log and return rather
+than error), `get_screen_size`/`list_monitors` fall back to a fixed 1920×1080 since
+there's no display to detect, and battery/network detection report "unknown" — there's
+no hardware to ask. Set `screen_width`/`screen_height` in config.toml for a different
+render size — unlike the other backends, this also sizes `list_monitors()`'s single
+synthetic monitor (so `combo_mode = "per_monitor"` renders at that size too), since
+there's no real per-call size hook for that method to use instead. Unlike `windows`/
+`kde`/`macos`, `render` is **never** chosen by `"auto"` detection, even on an
+unrecognized OS or Linux desktop environment: an unsupported real desktop should still
+raise `NotImplementedError` (with a pointer to `platform = "render"` in the error
+message) rather than silently doing nothing. You have to opt in explicitly.
 
 ### Adding another OS/desktop environment
 

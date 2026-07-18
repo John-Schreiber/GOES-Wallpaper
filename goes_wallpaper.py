@@ -216,8 +216,11 @@ class Config:
     # Which platform_base.WallpaperPlatform backend to use. "auto" (default)
     # detects from sys.platform / XDG_CURRENT_DESKTOP, same as always -- explicit
     # "windows"/"kde" short-circuit that detection, e.g. for a KDE session whose
-    # XDG_CURRENT_DESKTOP isn't set reliably. See platform_base.get_platform().
-    platform: str = "auto"  # "auto" | "windows" | "kde" | "macos"
+    # XDG_CURRENT_DESKTOP isn't set reliably. "render" opts into the render-only
+    # backend (never applies a desktop wallpaper; for headless boxes/containers/CI --
+    # see platform_render.RenderOnlyPlatform) and, unlike the others, is never
+    # chosen by "auto". See platform_base.get_platform().
+    platform: str = "auto"  # "auto" | "windows" | "kde" | "macos" | "render"
 
     # Output
     # This class-level default is Windows-specific and only applies when Config is
@@ -238,6 +241,10 @@ class Config:
     crop_anchor: float = 0.5  # 0.0 = top/left, 0.5 = center, 1.0 = bottom/right
     screen_width: int | None = None  # override auto-detection
     screen_height: int | None = None
+    # For platform = "render" specifically, these two also size the synthetic
+    # monitor list_monitors() reports (combo_mode = "per_monitor"'s render size) --
+    # see get_platform()'s render_fallback_width/height parameters. Every other
+    # backend ignores that plumbing; it only reaches RenderOnlyPlatform.
     span_all_monitors: bool = False  # crop to the full virtual desktop instead of the
     # primary monitor; pair with wallpaper_style = "span" so Windows stretches the one
     # image across all displays instead of just mirroring it onto the primary.
@@ -629,7 +636,7 @@ def validate_output_projection(cfg: Config) -> None:
             )
 
 
-_VALID_PLATFORMS = {"auto", "windows", "kde", "macos"}
+_VALID_PLATFORMS = {"auto", "windows", "kde", "macos", "render"}
 
 
 def validate_platform(cfg: Config) -> None:
@@ -2227,7 +2234,11 @@ def main(argv: list[str] | None = None) -> int:
     # read, safe to call twice.
     platform_probe_cfg = load_config(args.config, overrides)
     validate_platform(platform_probe_cfg)
-    platform = get_platform(platform_probe_cfg.platform)
+    platform = get_platform(
+        platform_probe_cfg.platform,
+        render_fallback_width=platform_probe_cfg.screen_width,
+        render_fallback_height=platform_probe_cfg.screen_height,
+    )
     cfg = load_config(args.config, overrides, platform=platform)
     validate_combos(cfg)
     validate_source_kind(cfg)

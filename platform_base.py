@@ -134,20 +134,40 @@ class WallpaperPlatform(ABC):
         this path not existing (falls back to Pillow's built-in default font)."""
 
 
-def get_platform(override: str = "auto") -> WallpaperPlatform:
-    """Construct the backend for the current OS. `override` is deliberately the only
-    argument — per-call behavior (like whether to use fallback screen-size detection)
-    belongs on the relevant WallpaperPlatform method instead, not baked into
-    construction, so this factory doesn't accumulate one backend's config knobs.
-    `override` is an exception to that: it picks *which* backend, not how one
+def get_platform(
+    override: str = "auto",
+    *,
+    render_fallback_width: int | None = None,
+    render_fallback_height: int | None = None,
+) -> WallpaperPlatform:
+    """Construct the backend for the current OS. `override` is deliberately almost
+    the only argument — per-call behavior (like whether to use fallback screen-size
+    detection) belongs on the relevant WallpaperPlatform method instead, not baked
+    into construction, so this factory doesn't accumulate one backend's config
+    knobs. `override` is an exception to that: it picks *which* backend, not how one
     behaves, so it stays here rather than on any individual backend.
+
+    `render_fallback_width`/`render_fallback_height` are a second, narrower
+    exception, forwarded only to platform_render.RenderOnlyPlatform (ignored for
+    every other backend, which detects real hardware and has no use for a size
+    hint at construction time). They exist because RenderOnlyPlatform.list_monitors()
+    -- unlike get_screen_size() -- has no per-call size parameters at all (a fixed
+    WallpaperPlatform signature shared with the real backends), so a
+    combo_mode = "per_monitor" render size can only reach it via construction.
+    goes_wallpaper.main() passes Config.screen_width/screen_height here.
 
     "auto" (default) preserves today's sys.platform/XDG_CURRENT_DESKTOP sniffing
     below. An explicit "windows"/"kde"/"macos" short-circuits that sniffing entirely --
     for forcing a backend under a session where env-var detection is unreliable, or
-    for testing. Config.platform (goes_wallpaper.py) is validated against the same
-    set of names by validate_platform() before this is called, so an unrecognized
-    value never reaches here."""
+    for testing. "render" is a third explicit option: platform_render.
+    RenderOnlyPlatform, which never applies a desktop wallpaper (see its module
+    docstring) -- for headless boxes with no desktop shell at all, typically paired
+    with Config.render_to. Unlike "windows"/"kde", "render" is never chosen by
+    "auto" detection below, even on an unrecognized OS/desktop -- it's opt-in only,
+    so an unsupported real desktop still raises rather than silently doing nothing.
+    Config.platform (goes_wallpaper.py) is validated against the same set of names
+    by validate_platform() before this is called, so an unrecognized value never
+    reaches here."""
     if override == "windows":
         from platform_windows import WindowsPlatform
         return WindowsPlatform()
@@ -157,6 +177,9 @@ def get_platform(override: str = "auto") -> WallpaperPlatform:
     if override == "macos":
         from platform_macos import MacOSPlatform
         return MacOSPlatform()
+    if override == "render":
+        from platform_render import RenderOnlyPlatform
+        return RenderOnlyPlatform(render_fallback_width, render_fallback_height)
 
     if sys.platform == "win32":
         from platform_windows import WindowsPlatform
@@ -179,12 +202,17 @@ def get_platform(override: str = "auto") -> WallpaperPlatform:
             "on Linux. To add another: implement platform_base.WallpaperPlatform in "
             "a new platform_<name>.py and add a branch here. Or, if this is actually "
             "a KDE session that XDG_CURRENT_DESKTOP/XDG_SESSION_DESKTOP just didn't "
-            "identify correctly, set `platform = \"kde\"` in config.toml to force it."
+            "identify correctly, set `platform = \"kde\"` in config.toml to force it. "
+            "If there's no desktop shell at all (a headless box/container/CI) and "
+            "you just want the rendered image(s), set `platform = \"render\"` "
+            "instead -- see platform_render.RenderOnlyPlatform."
         )
     raise NotImplementedError(
         f"No WallpaperPlatform backend for sys.platform={sys.platform!r} yet.\n"
         "To add one: implement platform_base.WallpaperPlatform (see "
         "platform_windows.WindowsPlatform or platform_linux_kde.KDEPlatform for "
         "reference implementations) in a new platform_<name>.py, and add a branch "
-        "here."
+        "here. If there's no desktop shell at all (a headless box/container/CI) "
+        "and you just want the rendered image(s), set `platform = \"render\"` "
+        "instead -- see platform_render.RenderOnlyPlatform."
     )
