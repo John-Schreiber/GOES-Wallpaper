@@ -124,12 +124,63 @@ class Combo:
 
 
 @dataclass(slots=True)
-class CityMarker:
-    """A labeled point for overlay_cities (georeferenced overlay; CONUS and Full Disk
-    on the cdn_jpg path, any sector via satpy_raw's real per-frame AreaInfo)."""
+class GraticuleConfig:
+    """A lat/lon grid line overlay -- the one procedural (non-GeoJSON) overlay type,
+    since a graticule is computed from step_deg, not authored content. See
+    overlays.toml / OVERLAYS.md."""
+    enabled: bool = False
+    step_deg: float = 10.0
+    color: tuple[int, int, int] = (255, 255, 0)
+    opacity: int = 110  # 0-255
+
+
+@dataclass(slots=True)
+class GeoJSONSource:
+    """One named, independently-styled static GeoJSON overlay (overlays.toml
+    [[geojson_sources]]) -- cached in data_dir, keyed on file mtimes + this entry's
+    name/style/satellite/resolution (see _geojson_files_cache_key/_id). Draws
+    whatever Point/MultiPoint/LineString/MultiLineString/Polygon/MultiPolygon
+    features `files` contain; a feature's `properties.color`/`properties.name`
+    override `color`/the marker label for that one feature. City markers are just
+    another GeoJSONSource pointing at a small hand-written GeoJSON file -- there's no
+    separate "city" concept in code."""
     name: str
-    lon: float
-    lat: float
+    files: tuple[str, ...] = ()
+    color: tuple[int, int, int] = (255, 255, 255)
+    line_width: int = 1
+    marker_radius: int = 5
+    opacity: int = 160  # 0-255
+    font_size: int = 14  # for Point/MultiPoint features carrying a `name` property
+
+
+@dataclass(slots=True)
+class ShellSource:
+    """One named, independently-styled GeoJSON overlay sourced from an external
+    command (overlays.toml [[shell_sources]]) -- re-run every cycle, never cached,
+    for genuinely fresh data (live storm tracks, fire perimeters, etc.). `command` is
+    an argv list, not a shell string -- no shell parsing, so no shell-injection risk.
+    A non-zero exit code, a timeout, or unparseable stdout is logged and skipped
+    rather than breaking the update cycle."""
+    name: str
+    command: tuple[str, ...] = ()
+    timeout: float = 10.0
+    color: tuple[int, int, int] = (0, 200, 255)
+    line_width: int = 2
+    marker_radius: int = 5
+    opacity: int = 200  # 0-255
+    font_size: int = 14  # for Point/MultiPoint features carrying a `name` property
+
+
+@dataclass(slots=True)
+class OverlaysConfig:
+    """Everything drawn on top of the fetched satellite frame, loaded from a separate
+    file (overlays.toml, see DEFAULT_OVERLAYS_CONFIG_PATH/load_overlays_config) --
+    kept out of Config/config.toml since this is content, not app behavior, and
+    grows independently of it (more cities, more GeoJSON sources) the way combos or
+    scheduling settings don't. See OVERLAYS.md."""
+    graticule: GraticuleConfig = field(default_factory=GraticuleConfig)
+    geojson_sources: tuple[GeoJSONSource, ...] = ()
+    shell_sources: tuple[ShellSource, ...] = ()
 
 
 @dataclass(slots=True)
@@ -167,9 +218,9 @@ class Config:
     # "windows"/"kde" short-circuit that detection, e.g. for a KDE session whose
     # XDG_CURRENT_DESKTOP isn't set reliably. "render" opts into the render-only
     # backend (never applies a desktop wallpaper; for headless boxes/containers/CI --
-    # see platform_render.RenderOnlyPlatform) and, unlike the other two, is never
+    # see platform_render.RenderOnlyPlatform) and, unlike the others, is never
     # chosen by "auto". See platform_base.get_platform().
-    platform: str = "auto"  # "auto" | "windows" | "kde" | "render"
+    platform: str = "auto"  # "auto" | "windows" | "kde" | "macos" | "render"
 
     # Output
     # This class-level default is Windows-specific and only applies when Config is
@@ -265,55 +316,9 @@ class Config:
     output_projection_lcc_lat1: float | None = None
     output_projection_lcc_lat2: float | None = None
 
-    # Georeferenced overlays drawn on the raw fetched frame, before any of our own
-    # trim/crop/resize (so the pixel grid matches the calibration below). CONUS and
-    # Full Disk only — the CONUS calibration constants (GEOS projection extent per
-    # satellite) were derived from one real ABI L1b CONUS file per satellite and
-    # validated against 10 known city landmarks (median error well under a pixel at
-    # 2500x1500); Full Disk reuses satpy's own published extent (see
-    # _GEOS_AREA_FULL_DISK). Mesoscale isn't supported — its extent isn't fixed, it
-    # moves, so it can't be hardcoded the same way. Adds to, doesn't replace, NOAA's
-    # own baked-in state lines — this can't remove those, see source_crop_* above.
-    overlay_graticule: bool = False
-    overlay_graticule_step_deg: float = 10.0
-    overlay_graticule_color: tuple[int, int, int] = (255, 255, 0)
-    overlay_graticule_opacity: int = 110  # 0-255
-    overlay_cities: tuple[CityMarker, ...] = ()
-    overlay_city_marker_radius: int = 5
-    overlay_city_color: tuple[int, int, int] = (255, 60, 60)
-    overlay_city_font_size: int = 18
-
-    # A single external overlay provider: runs `overlay_shell_command` (an argv list,
-    # not a shell string -- no shell parsing, so no shell-injection risk) once per
-    # cycle and expects a GeoJSON FeatureCollection/Feature/geometry on stdout. Draws
-    # whatever Point/LineString/Polygon (or Multi* variant) features it returns --
-    # e.g. a script that fetches NHC storm tracks or NIFC fire perimeters and prints
-    # GeoJSON. Empty tuple (the default) disables it. A non-zero exit code, a timeout,
-    # or unparseable stdout is logged and skipped, same as the CONUS/calibration
-    # checks above -- a broken provider must not break the whole update cycle.
-    overlay_shell_command: tuple[str, ...] = ()
-    overlay_shell_timeout: float = 10.0
-    overlay_shell_color: tuple[int, int, int] = (0, 200, 255)
-    overlay_shell_line_width: int = 2
-    overlay_shell_marker_radius: int = 5
-    overlay_shell_opacity: int = 200
-    overlay_shell_font_size: int = 14  # for Point features carrying a `name` property
-
-    # A static overlay provider: reads GeoJSON from each path in
-    # `overlay_geojson_files` (unlike overlay_shell_command, no re-fetching -- these
-    # are files on disk that don't change cycle to cycle), merges every file's
-    # features, and draws them the same way overlay_shell_command's output is drawn.
-    # The composited RGBA layer is cached in cfg.data_dir, keyed on each file's path +
-    # mtime plus (satellite, frame size, style) -- so editing a file, changing
-    # resolution/satellite, or changing overlay_geojson_* below invalidates the cache
-    # automatically, but an unchanged config only re-parses/re-projects once instead
-    # of every single cycle.
-    overlay_geojson_files: tuple[str, ...] = ()
-    overlay_geojson_color: tuple[int, int, int] = (255, 255, 255)
-    overlay_geojson_line_width: int = 1
-    overlay_geojson_marker_radius: int = 5
-    overlay_geojson_opacity: int = 160
-    overlay_geojson_font_size: int = 14  # for Point features carrying a `name` property
+    # Overlays (graticule, city/GeoJSON markers, live shell-command GeoJSON) moved out
+    # of Config entirely -- they're content, not app behavior, and grow independently
+    # of everything else here. See OverlaysConfig / overlays.toml / OVERLAYS.md.
 
     # Multiple named source+crop combos (see the Combo dataclass), and how to use
     # them. combos are ignored entirely in "single" mode (the default — just the
@@ -449,18 +454,6 @@ def load_config(config_path: Path, overrides: dict[str, Any], platform: Wallpape
         values["render_to"] = Path(values["render_to"])
     if "retry_statuses" in values:
         values["retry_statuses"] = tuple(values["retry_statuses"])
-    if "overlay_graticule_color" in values:
-        values["overlay_graticule_color"] = tuple(values["overlay_graticule_color"])
-    if "overlay_city_color" in values:
-        values["overlay_city_color"] = tuple(values["overlay_city_color"])
-    if "overlay_shell_command" in values:
-        values["overlay_shell_command"] = tuple(values["overlay_shell_command"])
-    if "overlay_shell_color" in values:
-        values["overlay_shell_color"] = tuple(values["overlay_shell_color"])
-    if "overlay_geojson_files" in values:
-        values["overlay_geojson_files"] = tuple(values["overlay_geojson_files"])
-    if "overlay_geojson_color" in values:
-        values["overlay_geojson_color"] = tuple(values["overlay_geojson_color"])
     if "combos" in values:
         combo_fields = {f.name for f in fields(Combo)}
         parsed = []
@@ -470,17 +463,79 @@ def load_config(config_path: Path, overrides: dict[str, Any], platform: Wallpape
                 raise ValueError(f"Unknown key(s) in combos[{i}]: {', '.join(sorted(unknown_keys))}")
             parsed.append(Combo(**combo_dict))
         values["combos"] = tuple(parsed)
-    if "overlay_cities" in values:
-        city_fields = {f.name for f in fields(CityMarker)}
-        parsed = []
-        for i, city_dict in enumerate(values["overlay_cities"]):
-            unknown_keys = set(city_dict) - city_fields
-            if unknown_keys:
-                raise ValueError(f"Unknown key(s) in overlay_cities[{i}]: {', '.join(sorted(unknown_keys))}")
-            parsed.append(CityMarker(**city_dict))
-        values["overlay_cities"] = tuple(parsed)
 
     return Config(**values)
+
+
+DEFAULT_OVERLAYS_CONFIG_PATH = Path(__file__).with_name("overlays.toml")
+
+
+def load_overlays_config(overlays_path: Path) -> OverlaysConfig:
+    """Build an OverlaysConfig from an optional TOML file -- overlays.toml, kept
+    separate from config.toml/load_config since this is content (what to draw), not
+    app behavior. A missing file means no overlays, same as an all-empty one; there
+    are no CLI overrides for overlay content, unlike Config's fields."""
+    values: dict[str, Any] = {}
+    if overlays_path.exists():
+        with overlays_path.open("rb") as f:
+            values.update(tomllib.load(f))
+
+    valid_top_level = {f.name for f in fields(OverlaysConfig)}
+    unknown = set(values) - valid_top_level
+    if unknown:
+        raise ValueError(f"Unknown overlays config key(s) in {overlays_path}: {', '.join(sorted(unknown))}")
+
+    if "graticule" in values:
+        graticule_fields = {f.name for f in fields(GraticuleConfig)}
+        unknown_keys = set(values["graticule"]) - graticule_fields
+        if unknown_keys:
+            raise ValueError(f"Unknown key(s) in [graticule]: {', '.join(sorted(unknown_keys))}")
+        graticule_values = dict(values["graticule"])
+        if "color" in graticule_values:
+            graticule_values["color"] = tuple(graticule_values["color"])
+        values["graticule"] = GraticuleConfig(**graticule_values)
+
+    if "geojson_sources" in values:
+        source_fields = {f.name for f in fields(GeoJSONSource)}
+        parsed = []
+        for i, source_dict in enumerate(values["geojson_sources"]):
+            unknown_keys = set(source_dict) - source_fields
+            if unknown_keys:
+                raise ValueError(f"Unknown key(s) in geojson_sources[{i}]: {', '.join(sorted(unknown_keys))}")
+            source_values = dict(source_dict)
+            if "files" in source_values:
+                source_values["files"] = tuple(source_values["files"])
+            if "color" in source_values:
+                source_values["color"] = tuple(source_values["color"])
+            parsed.append(GeoJSONSource(**source_values))
+        values["geojson_sources"] = tuple(parsed)
+
+    if "shell_sources" in values:
+        source_fields = {f.name for f in fields(ShellSource)}
+        parsed = []
+        for i, source_dict in enumerate(values["shell_sources"]):
+            unknown_keys = set(source_dict) - source_fields
+            if unknown_keys:
+                raise ValueError(f"Unknown key(s) in shell_sources[{i}]: {', '.join(sorted(unknown_keys))}")
+            source_values = dict(source_dict)
+            if "command" in source_values:
+                source_values["command"] = tuple(source_values["command"])
+            if "color" in source_values:
+                source_values["color"] = tuple(source_values["color"])
+            parsed.append(ShellSource(**source_values))
+        values["shell_sources"] = tuple(parsed)
+
+    return OverlaysConfig(**values)
+
+
+def validate_overlays_config(overlays: OverlaysConfig) -> None:
+    geojson_names = [s.name for s in overlays.geojson_sources]
+    if len(geojson_names) != len(set(geojson_names)):
+        raise ValueError(f"geojson_sources names must be unique: {geojson_names}")
+
+    shell_names = [s.name for s in overlays.shell_sources]
+    if len(shell_names) != len(set(shell_names)):
+        raise ValueError(f"shell_sources names must be unique: {shell_names}")
 
 
 def validate_combos(cfg: Config) -> None:
@@ -581,7 +636,7 @@ def validate_output_projection(cfg: Config) -> None:
             )
 
 
-_VALID_PLATFORMS = {"auto", "windows", "kde", "render"}
+_VALID_PLATFORMS = {"auto", "windows", "kde", "macos", "render"}
 
 
 def validate_platform(cfg: Config) -> None:
@@ -889,7 +944,7 @@ _GEOS_AREA_FULL_DISK = {
 _GEOS_AREA_BY_SECTOR = {"CONUS": _GEOS_AREA_CONUS, "FD": _GEOS_AREA_FULL_DISK}
 
 # Overlay line widths/marker sizes below are tuned by eye at this frame width, then
-# scaled proportionally for other resolutions (draw_graticule, draw_city_markers) —
+# scaled proportionally for other resolutions (draw_graticule, _build_geojson_layer) —
 # not a physical/measured constant, just the width the original tuning pass used.
 _OVERLAY_REFERENCE_WIDTH_PX = 2000
 
@@ -1158,7 +1213,7 @@ def draw_graticule(
     area: AreaInfo | None = None, sector: str = "CONUS",
 ) -> Image.Image:
     """Draw a lat/lon grid on img (must be the raw, untrimmed/uncropped frame — see
-    the pipeline-order note on overlay_* config fields). Uses the real per-frame
+    the pipeline-order note in draw_overlays). Uses the real per-frame
     `area` (any sector) when given, e.g. from a satpy_raw fetch; otherwise falls back
     to the hand-calibrated `sector` lookup (see _GEOS_AREA_BY_SECTOR) keyed by
     `satellite`."""
@@ -1199,40 +1254,6 @@ def draw_graticule(
     base = img.convert("RGBA")
     base.alpha_composite(overlay)
     return base.convert("RGB")
-
-
-def draw_city_markers(
-    img: Image.Image, satellite: str, cities: tuple[CityMarker, ...], cfg: Config,
-    area: AreaInfo | None = None, sector: str = "CONUS",
-) -> Image.Image:
-    """Draw labeled markers at each city's projected pixel position. Same
-    raw-frame-only requirement and area-lookup fallback as draw_graticule."""
-    if not cities:
-        return img
-    w, h = img.size
-    lons = np.array([c.lon for c in cities])
-    lats = np.array([c.lat for c in cities])
-    result = lonlat_to_pixels_area(area, lons, lats, w, h) if area is not None else lonlat_to_pixels(satellite, lons, lats, w, h, sector)
-    if result is None:
-        return img
-    cols, rows = result
-
-    scale = max(1.0, w / _OVERLAY_REFERENCE_WIDTH_PX)
-    img = img.convert("RGB")
-    draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype(cfg.info_font_path, round(cfg.overlay_city_font_size * scale))
-    except OSError:
-        font = ImageFont.load_default()
-
-    r = cfg.overlay_city_marker_radius * scale
-    color = cfg.overlay_city_color
-    for city, c, row in zip(cities, cols, rows):
-        if not (0 <= c <= w and 0 <= row <= h and np.isfinite(c) and np.isfinite(row)):
-            continue
-        draw.ellipse((c - r, row - r, c + r, row + r), outline=color, width=max(1, round(2 * scale)))
-        draw.text((c + r + 4, row), city.name, font=font, fill=color)
-    return img
 
 
 def fetch_shell_geojson(command: tuple[str, ...], timeout: float) -> dict[str, Any] | None:
@@ -1331,9 +1352,8 @@ def _build_geojson_layer(
     MultiPolygon features onto a fresh (w, h) transparent RGBA layer. Per-feature
     `properties.color` (see _resolve_feature_color -- an [r, g, b] list, a hex string,
     or a named color) overrides the given default color; a Point/MultiPoint feature's
-    `properties.name`, if present, is drawn as a text label next to its marker (same
-    layout as draw_city_markers). Returns just the layer (not
-    composited onto anything) so callers can cache it."""
+    `properties.name`, if present, is drawn as a text label next to its marker.
+    Returns just the layer (not composited onto anything) so callers can cache it."""
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     scale = max(1.0, w / _OVERLAY_REFERENCE_WIDTH_PX)
@@ -1410,7 +1430,7 @@ def draw_geojson_overlay(
 
 
 def _geojson_files_cache_key(
-    paths: tuple[str, ...], satellite: str, w: int, h: int,
+    name: str, paths: tuple[str, ...], satellite: str, w: int, h: int,
     color: tuple[int, int, int], line_width: int, marker_radius: int, opacity: int,
     font_path: str, font_size: int, sector: str,
 ) -> dict[str, Any]:
@@ -1425,60 +1445,60 @@ def _geojson_files_cache_key(
             mtime = None
         file_stats.append([p, mtime])
     return {
-        "files": file_stats, "satellite": satellite, "sector": sector, "w": w, "h": h,
+        "name": name, "files": file_stats, "satellite": satellite, "sector": sector, "w": w, "h": h,
         "color": list(color), "line_width": line_width, "marker_radius": marker_radius, "opacity": opacity,
         "font_path": font_path, "font_size": font_size,
     }
 
 
 def _geojson_files_cache_id(
-    paths: tuple[str, ...], satellite: str, w: int, h: int,
+    name: str, paths: tuple[str, ...], satellite: str, w: int, h: int,
     color: tuple[int, int, int], line_width: int, marker_radius: int, opacity: int,
     font_path: str, font_size: int, sector: str,
 ) -> str:
-    """A short, stable identifier for one distinct (files, satellite, sector, frame
-    size, style) combination, used to give each such combination its own cache file.
-    Without this, every combo/satellite/resolution/sector sharing overlay_geojson_files
-    would fight over one fixed filename: rendering combo B would invalidate and
-    overwrite combo A's cached layer (their cache *keys* differ), so alternating
-    between them in "rotate"/"per_monitor" mode would rebuild on every single cycle --
-    never actually caching anything (see NEXT_STEPS.md item 16 for the related
+    """A short, stable identifier for one distinct (name, files, satellite, sector,
+    frame size, style) combination, used to give each such combination its own cache
+    file. `name` (the geojson_sources entry's name) keeps distinct named sources from
+    colliding even if they happen to share every other field; without it, two
+    same-styled sources -- or the same source across combos/satellites/resolutions --
+    would fight over one fixed filename (see NEXT_STEPS.md item 16 for the related
     per-combo-overlay gap this compounds). Deliberately excludes each file's mtime --
     that still lives in the cache metadata and is checked separately, so editing a
     file invalidates the existing entry for this identity rather than minting a new
     cache file."""
     identity = {
-        "paths": list(paths), "satellite": satellite, "sector": sector, "w": w, "h": h,
+        "name": name, "paths": list(paths), "satellite": satellite, "sector": sector, "w": w, "h": h,
         "color": list(color), "line_width": line_width, "marker_radius": marker_radius,
         "opacity": opacity, "font_path": font_path, "font_size": font_size,
     }
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: EffectiveSource) -> Image.Image:
-    """Draw cfg.overlay_geojson_files onto img, caching the composited RGBA layer in
-    cfg.data_dir. Unlike overlay_shell_command, these are static files that don't
-    change cycle to cycle, so re-parsing and re-projecting every cycle is wasted work
-    once a layer has any real size (e.g. full county borders) -- the cache key (each
-    file's path/mtime + satellite/frame-size/style) means an unchanged config only
-    pays that cost once, but editing a file or bumping resolution rebuilds it
-    automatically. The cache *filename* is itself keyed on satellite/frame-size/style
-    (_geojson_files_cache_id) so distinct combos each get their own cache entry
+def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: EffectiveSource, geojson_source: GeoJSONSource) -> Image.Image:
+    """Draw one overlays.toml [[geojson_sources]] entry onto img, caching the
+    composited RGBA layer in cfg.data_dir. Unlike shell_sources, these are static
+    files that don't change cycle to cycle, so re-parsing and re-projecting every
+    cycle is wasted work once a layer has any real size (e.g. full county borders) --
+    the cache key (each file's path/mtime + name/satellite/frame-size/style) means an
+    unchanged config only pays that cost once, but editing a file or bumping
+    resolution rebuilds it automatically. The cache *filename* is itself keyed on
+    name/satellite/frame-size/style (_geojson_files_cache_id) so distinct sources
+    (and distinct combos/satellites/resolutions) each get their own cache entry
     instead of overwriting a shared one -- see its docstring."""
-    if not cfg.overlay_geojson_files:
+    if not geojson_source.files:
         return img
     w, h = img.size
     key = _geojson_files_cache_key(
-        cfg.overlay_geojson_files, source.satellite, w, h,
-        cfg.overlay_geojson_color, cfg.overlay_geojson_line_width,
-        cfg.overlay_geojson_marker_radius, cfg.overlay_geojson_opacity,
-        cfg.info_font_path, cfg.overlay_geojson_font_size, source.sector,
+        geojson_source.name, geojson_source.files, source.satellite, w, h,
+        geojson_source.color, geojson_source.line_width,
+        geojson_source.marker_radius, geojson_source.opacity,
+        cfg.info_font_path, geojson_source.font_size, source.sector,
     )
     cache_id = _geojson_files_cache_id(
-        cfg.overlay_geojson_files, source.satellite, w, h,
-        cfg.overlay_geojson_color, cfg.overlay_geojson_line_width,
-        cfg.overlay_geojson_marker_radius, cfg.overlay_geojson_opacity,
-        cfg.info_font_path, cfg.overlay_geojson_font_size, source.sector,
+        geojson_source.name, geojson_source.files, source.satellite, w, h,
+        geojson_source.color, geojson_source.line_width,
+        geojson_source.marker_radius, geojson_source.opacity,
+        cfg.info_font_path, geojson_source.font_size, source.sector,
     )
     cache_png = cfg.data_dir / f"overlay_geojson_cache_{cache_id}.png"
     cache_meta = cfg.data_dir / f"overlay_geojson_cache_{cache_id}.json"
@@ -1493,34 +1513,34 @@ def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: Effecti
 
     if layer is None:
         features: list[dict[str, Any]] = []
-        for path in cfg.overlay_geojson_files:
+        for path in geojson_source.files:
             try:
                 geojson = json.loads(Path(path).read_text())
             except (OSError, json.JSONDecodeError) as e:
-                logging.warning("overlay_geojson_files: couldn't read/parse %s: %s", path, e)
+                logging.warning("geojson_sources[%r]: couldn't read/parse %s: %s", geojson_source.name, path, e)
                 continue
             features.extend(_iter_geojson_features(geojson))
         if not features:
             return img
         layer = _build_geojson_layer(
             source.satellite, features, w, h,
-            cfg.overlay_geojson_color, cfg.overlay_geojson_line_width,
-            cfg.overlay_geojson_marker_radius, cfg.overlay_geojson_opacity,
-            cfg.info_font_path, cfg.overlay_geojson_font_size, source.sector,
+            geojson_source.color, geojson_source.line_width,
+            geojson_source.marker_radius, geojson_source.opacity,
+            cfg.info_font_path, geojson_source.font_size, source.sector,
         )
         try:
             cfg.data_dir.mkdir(parents=True, exist_ok=True)
             layer.save(cache_png)
             _atomic_write_text(cache_meta, json.dumps(key))
         except OSError as e:
-            logging.warning("Couldn't write overlay_geojson_files cache: %s", e)
+            logging.warning("Couldn't write geojson_sources[%r] cache: %s", geojson_source.name, e)
 
     base = img.convert("RGBA")
     base.alpha_composite(layer)
     return base.convert("RGB")
 
 
-def draw_overlays(img: Image.Image, cfg: Config, source: EffectiveSource, area: AreaInfo | None = None) -> Image.Image:
+def draw_overlays(img: Image.Image, cfg: Config, overlays: OverlaysConfig, source: EffectiveSource, area: AreaInfo | None = None) -> Image.Image:
     """Apply configured georeferenced overlays. Must run on the raw fetched frame,
     before trim_source_caption/crop_fractional/crop_to_screen — those change the pixel
     grid the calibration above assumes.
@@ -1528,12 +1548,16 @@ def draw_overlays(img: Image.Image, cfg: Config, source: EffectiveSource, area: 
     `area` is real per-frame georeferencing (only available for satpy_raw frames,
     see FetchedFrame.area_info) -- when given, it's valid for any sector, and the
     hand-calibrated/_GEOS_AREA_BY_SECTOR-allowlist gate below doesn't apply to
-    overlay_graticule/overlay_cities (see draw_graticule/draw_city_markers, which
-    both take `area` too). Without it (the cdn_jpg path, which has no georeferencing
-    of its own), all four overlay kinds fall back to the hand-calibrated per-sector
-    lookup (CONUS and Full Disk; Mesoscale has no fixed extent to hardcode) and its
-    gate, keyed on `source.sector` -- see _GEOS_AREA_BY_SECTOR."""
-    if not (cfg.overlay_graticule or cfg.overlay_cities or cfg.overlay_shell_command or cfg.overlay_geojson_files):
+    overlays.graticule (see draw_graticule, which takes `area` too). Without it (the
+    cdn_jpg path, which has no georeferencing of its own), every overlay kind falls
+    back to the hand-calibrated per-sector lookup (CONUS and Full Disk; Mesoscale has
+    no fixed extent to hardcode) and its gate, keyed on `source.sector` -- see
+    _GEOS_AREA_BY_SECTOR.
+
+    Each geojson_sources/shell_sources entry is drawn independently, in list order,
+    each wrapped in its own try/except -- one broken source (a bad file, a failing
+    command) must not take the others down with it."""
+    if not (overlays.graticule.enabled or overlays.geojson_sources or overlays.shell_sources):
         return img
     if area is None:
         calibration = _GEOS_AREA_BY_SECTOR.get(source.sector)
@@ -1550,30 +1574,31 @@ def draw_overlays(img: Image.Image, cfg: Config, source: EffectiveSource, area: 
             )
             return img
 
-    if cfg.overlay_graticule:
-        img = draw_graticule(img, source.satellite, cfg.overlay_graticule_step_deg, cfg.overlay_graticule_color, cfg.overlay_graticule_opacity, area, source.sector)
-    if cfg.overlay_cities:
-        img = draw_city_markers(img, source.satellite, cfg.overlay_cities, cfg, area, source.sector)
-    if cfg.overlay_geojson_files:
+    if overlays.graticule.enabled:
+        img = draw_graticule(
+            img, source.satellite, overlays.graticule.step_deg,
+            overlays.graticule.color, overlays.graticule.opacity, area, source.sector,
+        )
+    for geojson_source in overlays.geojson_sources:
         try:
-            img = render_static_geojson_overlay(img, cfg, source)
+            img = render_static_geojson_overlay(img, cfg, source, geojson_source)
         except Exception:
             logging.exception(
-                "[%s] overlay_geojson_files overlay failed; skipping", source.name,
+                "[%s] geojson_sources[%r] overlay failed; skipping", source.name, geojson_source.name,
             )
-    if cfg.overlay_shell_command:
-        geojson = fetch_shell_geojson(cfg.overlay_shell_command, cfg.overlay_shell_timeout)
+    for shell_source in overlays.shell_sources:
+        geojson = fetch_shell_geojson(shell_source.command, shell_source.timeout)
         if geojson is not None:
             try:
                 img = draw_geojson_overlay(
                     img, source.satellite, geojson,
-                    cfg.overlay_shell_color, cfg.overlay_shell_line_width,
-                    cfg.overlay_shell_marker_radius, cfg.overlay_shell_opacity,
-                    cfg.info_font_path, cfg.overlay_shell_font_size, source.sector,
+                    shell_source.color, shell_source.line_width,
+                    shell_source.marker_radius, shell_source.opacity,
+                    cfg.info_font_path, shell_source.font_size, source.sector,
                 )
             except Exception:
                 logging.exception(
-                    "[%s] overlay_shell_command returned unusable GeoJSON; skipping", source.name,
+                    "[%s] shell_sources[%r] returned unusable GeoJSON; skipping", source.name, shell_source.name,
                 )
     return img
 
@@ -1877,6 +1902,7 @@ def _fetch_satpy_raw(cfg: Config, source: EffectiveSource, sstate: dict[str, Any
 
 def fetch_and_render(
     cfg: Config,
+    overlays: OverlaysConfig,
     session: requests.Session,
     source: EffectiveSource,
     state: dict[str, Any],
@@ -1905,7 +1931,7 @@ def fetch_and_render(
     with frame.image as img:
         meta = build_metadata(source, frame)
 
-        img = draw_overlays(img, cfg, source, frame.area_info)
+        img = draw_overlays(img, cfg, overlays, source, frame.area_info)
 
         # NOAA's baked caption strip is a cdn_jpg-only artifact -- a satpy_raw
         # composite never has one to trim.
@@ -1993,7 +2019,7 @@ def _write_render_to(path: Path, img: Image.Image, label: str = "") -> None:
     logging.info("%sRendered frame saved to %s (--render-to set, wallpaper not applied)", prefix, path)
 
 
-def run_once(cfg: Config, session: requests.Session, platform: WallpaperPlatform) -> bool:
+def run_once(cfg: Config, overlays: OverlaysConfig, session: requests.Session, platform: WallpaperPlatform) -> bool:
     """combo_mode = "single": fetch-crop-annotate-apply the one top-level configured
     source. Returns True if the wallpaper changed."""
     if should_skip_for_power(cfg, platform):
@@ -2005,7 +2031,7 @@ def run_once(cfg: Config, session: requests.Session, platform: WallpaperPlatform
     maybe_wait_for_sync(cfg, state, source)
 
     screen_size = platform.get_screen_size(cfg.span_all_monitors, cfg.screen_width, cfg.screen_height, cfg.wmi_screen_size_fallback) if cfg.crop_to_screen else (0, 0)
-    result = fetch_and_render(cfg, session, source, state, screen_size, platform)
+    result = fetch_and_render(cfg, overlays, session, source, state, screen_size, platform)
     if result is None:
         logging.info("Leaving current wallpaper in place")
         save_state(cfg, state)
@@ -2028,7 +2054,7 @@ def run_once(cfg: Config, session: requests.Session, platform: WallpaperPlatform
     return True
 
 
-def run_once_rotate(cfg: Config, session: requests.Session, platform: WallpaperPlatform) -> bool:
+def run_once_rotate(cfg: Config, overlays: OverlaysConfig, session: requests.Session, platform: WallpaperPlatform) -> bool:
     """combo_mode = "rotate": cycle through cfg.combos one per cycle (index persisted
     in state.json), applied as a single wallpaper just like "single" mode."""
     if not cfg.combos:
@@ -2044,7 +2070,7 @@ def run_once_rotate(cfg: Config, session: requests.Session, platform: WallpaperP
     maybe_wait_for_sync(cfg, state, source)
 
     screen_size = platform.get_screen_size(cfg.span_all_monitors, cfg.screen_width, cfg.screen_height, cfg.wmi_screen_size_fallback) if cfg.crop_to_screen else (0, 0)
-    result = fetch_and_render(cfg, session, source, state, screen_size, platform)
+    result = fetch_and_render(cfg, overlays, session, source, state, screen_size, platform)
     if result is None:
         logging.info("[%s] Leaving current wallpaper in place", combo.name)
         save_state(cfg, state)
@@ -2068,7 +2094,7 @@ def run_once_rotate(cfg: Config, session: requests.Session, platform: WallpaperP
     return True
 
 
-def run_once_per_monitor(cfg: Config, session: requests.Session, platform: WallpaperPlatform) -> bool:
+def run_once_per_monitor(cfg: Config, overlays: OverlaysConfig, session: requests.Session, platform: WallpaperPlatform) -> bool:
     """combo_mode = "per_monitor": each combo's `monitor` index gets its own
     independently rendered+applied wallpaper. Monitors with no assigned combo are
     left untouched. Returns True if any monitor was updated."""
@@ -2092,7 +2118,7 @@ def run_once_per_monitor(cfg: Config, session: requests.Session, platform: Wallp
             continue
 
         source = resolve_source(cfg, combo)
-        result = fetch_and_render(cfg, session, source, state, (monitor.width, monitor.height), platform)
+        result = fetch_and_render(cfg, overlays, session, source, state, (monitor.width, monitor.height), platform)
         if result is None:
             logging.info("[%s] Leaving monitor %d's wallpaper in place", combo.name, i)
             continue
@@ -2126,7 +2152,7 @@ _CYCLE_FUNCS = {
 }
 
 
-def run_loop(cfg: Config, session: requests.Session, platform: WallpaperPlatform) -> None:
+def run_loop(cfg: Config, overlays: OverlaysConfig, session: requests.Session, platform: WallpaperPlatform) -> None:
     """Run indefinitely, waking on drift-corrected boundaries instead of naive sleep(),
     so the effective cadence doesn't creep as each cycle's own runtime accumulates.
     When sync_to_capture_time is enabled, the boundary itself is nudged to line up
@@ -2137,7 +2163,7 @@ def run_loop(cfg: Config, session: requests.Session, platform: WallpaperPlatform
     cycle = _CYCLE_FUNCS[cfg.combo_mode]
     while True:
         try:
-            cycle(cfg, session, platform)
+            cycle(cfg, overlays, session, platform)
         except Exception:
             logging.exception("Cycle failed; will retry next interval")
 
@@ -2164,6 +2190,11 @@ def _rand_unit() -> float:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Path to a TOML config file")
+    p.add_argument(
+        "--overlays-config", type=Path, default=DEFAULT_OVERLAYS_CONFIG_PATH, dest="overlays_config",
+        help="Path to a TOML overlays file (graticule/geojson_sources/shell_sources; see OVERLAYS.md). "
+             "Missing file = no overlays.",
+    )
     p.add_argument("--satellite", help="e.g. GOES19, GOES18")
     p.add_argument("--sector", help="e.g. CONUS, FD, M1, M2")
     p.add_argument("--product", help="e.g. GEOCOLOR")
@@ -2194,7 +2225,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     overrides = {
-        k: v for k, v in vars(args).items() if k != "config"
+        k: v for k, v in vars(args).items() if k not in ("config", "overlays_config")
     }
     # Chicken-and-egg: get_platform() needs cfg.platform (which backend to force, if
     # any) before it can run, but load_config() wants a WallpaperPlatform in hand to
@@ -2216,12 +2247,15 @@ def main(argv: list[str] | None = None) -> int:
     validate_platform(cfg)
     setup_logging(cfg)
 
+    overlays = load_overlays_config(args.overlays_config)
+    validate_overlays_config(overlays)
+
     session = build_session(cfg)
     try:
         if cfg.loop:
-            run_loop(cfg, session, platform)
+            run_loop(cfg, overlays, session, platform)
         else:
-            _CYCLE_FUNCS[cfg.combo_mode](cfg, session, platform)
+            _CYCLE_FUNCS[cfg.combo_mode](cfg, overlays, session, platform)
     except KeyboardInterrupt:
         logging.info("Interrupted, exiting")
         return 130

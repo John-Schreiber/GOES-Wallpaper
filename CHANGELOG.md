@@ -15,6 +15,45 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `"windows"`/`"kde"`, it's never chosen by `"auto"` detection; opt in explicitly via
   config.toml. See README's "Render-only backend" section.
 
+### Changed — BREAKING: overlays moved out of config.toml
+
+Georeferenced overlays (graticule, city markers, GeoJSON files, a live shell-command
+GeoJSON source) now live in a separate file, `overlays.toml` (override with
+`--overlays-config path/to/other.toml`), instead of `config.toml`'s flat `overlay_*`
+keys and `[[overlay_cities]]`. See [OVERLAYS.md](OVERLAYS.md) for the new schema.
+
+- All 21 `overlay_*` Config fields are gone. `load_config` now rejects them as
+  unknown keys, same as any other typo — there's no backward-compat shim.
+- `overlay_cities`/`CityMarker` are gone entirely, not just moved: a labeled city is
+  now just a `Point` feature with a `properties.name` in a GeoJSON file, drawn
+  through the same `geojson_sources` path as any other static content, rather than
+  a separate parallel mechanism with its own dataclass/draw function/style fields.
+- `geojson_sources`/`shell_sources` (the new names for `overlay_geojson_files`/
+  `overlay_shell_command`) are now **repeatable, named, independently styled**
+  lists instead of one singleton each — e.g. city markers and county borders can be
+  two separate, differently-styled `[[geojson_sources]]` entries instead of one
+  shared style applying to everything. Closes part of the multi-provider gap
+  tracked in `NEXT_STEPS.md` item 9.
+- The color/line-width/marker-radius/opacity/font-size field family that used to be
+  duplicated three ways (`overlay_city_*`/`overlay_shell_*`/`overlay_geojson_*`) is
+  now one shape, reused per entry (`NEXT_STEPS.md` item 15).
+- Have a pre-2.3.0 `config.toml`? Run `migrate_overlay_config.py path/to/config.toml`
+  to convert it automatically (writes `overlays.toml` + `overlays/cities.geojson`,
+  backs up the original as `config.toml.bak`).
+
+### Changed — README split into topic docs
+
+`README.md` had grown to 700+ lines. Two sections became their own docs, following
+the precedent `PROJECTIONS.md` already set for `output_projection`:
+
+- **[OVERLAYS.md](OVERLAYS.md)** — the overlays.toml schema, GeoJSON styling rules,
+  and the CONUS/Full Disk calibration caveat (previously split across three
+  different README sections, one of them oddly embedded in the `satpy_raw` section).
+- **[RUNNING.md](RUNNING.md)** — the three "running periodically" options
+  (`--loop`, Windows Task Scheduler, systemd `--user` timer).
+
+`README.md` itself now carries short pointer paragraphs in their place.
+
 ## [2.2.0] — 2026-07-18 — KDE Plasma backend, reprojection, lon/lat crop
 
 ### Added

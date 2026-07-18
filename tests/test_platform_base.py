@@ -6,9 +6,11 @@
 # (see pyproject.toml's sys_platform == 'win32' markers) -- so real "windows"
 # override coverage is skipped on other platforms, matching CI's approach for the
 # rest of the suite (platform-dependent logic tested via a stub, real backends only
-# exercised on their own OS). platform_linux_kde.py and platform_render.py have no
-# OS-locked imports (plain subprocess/shutil/json, or os/pathlib respectively), so
-# their override paths are exercised for real everywhere.
+# exercised on their own OS). platform_macos.py needs pyobjc's AppKit/Foundation
+# bindings (sys_platform == 'darwin' only), so its override coverage is skipped the
+# same way. platform_linux_kde.py and platform_render.py have no OS-locked imports
+# (plain subprocess/shutil/json, or os/pathlib respectively), so their override
+# paths are exercised for real everywhere.
 
 import sys
 
@@ -37,6 +39,11 @@ class TestGetPlatformOverride:
         from platform_windows import WindowsPlatform
 
         assert isinstance(platform_base.get_platform("windows"), WindowsPlatform)
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="platform_macos needs macOS-only pyobjc (AppKit/Foundation) deps")
+    def test_macos_override_returns_macos_platform(self):
+        from platform_macos import MacOSPlatform
+        assert isinstance(platform_base.get_platform("macos"), MacOSPlatform)
 
     def test_render_override_returns_render_only_platform(self):
         from platform_render import RenderOnlyPlatform
@@ -96,7 +103,12 @@ class TestGetPlatformAutoDetection:
             platform_base.get_platform("auto")
 
     def test_auto_raises_for_unsupported_sys_platform(self, monkeypatch):
-        monkeypatch.setattr(sys, "platform", "darwin")
+        # "darwin" used to be the example here, but it's no longer unsupported now
+        # that platform_macos.MacOSPlatform exists (see
+        # test_macos_override_returns_macos_platform above) -- use a genuinely
+        # unsupported sys.platform value instead so this still tests the real
+        # "no backend for this OS" path.
+        monkeypatch.setattr(sys, "platform", "freebsd13")
         with pytest.raises(NotImplementedError, match="No WallpaperPlatform backend"):
             platform_base.get_platform("auto")
 

@@ -3,11 +3,13 @@
 # without touching the script. Any key omitted here falls back to the script's
 # built-in default; any CLI flag passed at runtime overrides both.
 #
-# Note on section order: TOML array-of-tables ([[...]]) headers, like [[combos]] and
-# [[overlay_cities]] below, swallow every plain `key = value` line that follows them
-# until the next table header. To avoid that footgun, every array-of-tables section in
-# this file is placed at the very end, after all the plain scalar settings — keep new
-# scalar settings above them, not between them.
+# Note on section order: a TOML array-of-tables ([[combos]] below) header swallows
+# every plain `key = value` line that follows it until the next table header. To
+# avoid that footgun, it's placed at the very end, after all the plain scalar
+# settings — keep new scalar settings above it, not after.
+#
+# Overlays (graticule, cities, GeoJSON files, a live shell-command source) live in a
+# separate file, overlays.toml, not here -- see OVERLAYS.md.
 
 # --- Platform ---
 # Which platform_base.WallpaperPlatform backend to use. "auto" (default) detects
@@ -124,51 +126,8 @@ output_projection = "native"
 # output_projection_lcc_lat1 = 33.0
 # output_projection_lcc_lat2 = 45.0
 
-# --- Georeferenced overlays (optional) ---
-# Drawn on the raw fetched frame, before any of our own trim/crop/resize. Adds to,
-# doesn't replace, NOAA's own baked-in state lines (source_crop_* above explains why
-# those can't be removed). Calibrated for CONUS and Full Disk on GOES18/GOES19 (cdn_jpg)
-# — Mesoscale isn't supported there (its extent moves, so it can't be hardcoded); any
-# sector works on satpy_raw, which carries real per-frame georeferencing instead.
-overlay_graticule = false          # lat/lon grid lines
-overlay_graticule_step_deg = 10.0
-overlay_graticule_color = [255, 255, 0]
-overlay_graticule_opacity = 110    # 0-255
-overlay_city_marker_radius = 5     # base size at ~2000px width; scales up with resolution
-overlay_city_color = [255, 60, 60]
-overlay_city_font_size = 18        # base size at ~2000px width; scales up with resolution
-# Labeled city markers themselves are defined via [[overlay_cities]] at the end of
-# this file (see the note at the top about array-of-tables placement).
-
-# Static GeoJSON files (state/county borders, a coastline layer, a fixed marker set --
-# content that doesn't change cycle to cycle). Point/MultiPoint/LineString/
-# MultiLineString/Polygon/MultiPolygon are all drawn; a feature's `properties.color`
-# ([r, g, b]) overrides the color below for that one feature, and a Point/MultiPoint's
-# `properties.name` draws a text label next to the marker. The composited layer is
-# cached in data_dir (invalidated automatically if a file's content, this satellite/
-# resolution, or any overlay_geojson_* setting below changes) -- an unchanged config
-# only pays the parse/project/draw cost once, not every cycle.
-# overlay_geojson_files = ["overlays/counties.geojson", "overlays/coastline.geojson"]
-overlay_geojson_color = [255, 255, 255]
-overlay_geojson_line_width = 1
-overlay_geojson_marker_radius = 5
-overlay_geojson_opacity = 160
-overlay_geojson_font_size = 14
-
-# An external command run fresh every cycle (an argv list, not a shell string --
-# there's no shell parsing, so no shell-injection risk), whose stdout is parsed as
-# GeoJSON and drawn the same way overlay_geojson_files is. Unlike overlay_geojson_files
-# this is never cached, since the whole point of shelling out is presumably to pick up
-# genuinely fresh data (e.g. a script that fetches live NHC storm tracks or NIFC fire
-# perimeters and prints GeoJSON). A non-zero exit code, a timeout, or unparseable
-# stdout is logged and skipped rather than breaking the update cycle.
-# overlay_shell_command = ["python", "fetch_storms.py"]
-overlay_shell_timeout = 10.0
-overlay_shell_color = [0, 200, 255]
-overlay_shell_line_width = 2
-overlay_shell_marker_radius = 5
-overlay_shell_opacity = 200
-overlay_shell_font_size = 14
+# Georeferenced overlays (graticule, city/GeoJSON markers, a live shell-command
+# GeoJSON source) moved out of this file -- see overlays.toml and OVERLAYS.md.
 
 # --- Multi-source combos (optional) ---
 # Define named source+crop presets and how to use them. Ignored entirely unless
@@ -192,7 +151,7 @@ overlay_shell_font_size = 14
 #                   how many distinct combos are assigned.
 combo_mode = "single"
 # combos themselves (if combo_mode isn't "single") are defined via [[combos]] at the
-# end of this file, alongside [[overlay_cities]] -- see the note at the top.
+# end of this file -- see the note at the top.
 
 # --- Info block overlay ---
 info_block = true
@@ -274,21 +233,3 @@ log_level = "INFO"
 # satellite = "GOES18"
 # crop_left = 0.5
 # monitor = 1
-
-# --- City markers (array-of-tables; must come after every scalar setting above --
-# see the note at the top of this file) ---
-[[overlay_cities]]
-name = "Portland, ME"
-lon = -70.2568
-lat = 43.6591
-
-# More examples:
-# [[overlay_cities]]
-# name = "San Francisco"
-# lon = -122.42
-# lat = 37.77
-#
-# [[overlay_cities]]
-# name = "Denver"
-# lon = -104.99
-# lat = 39.74

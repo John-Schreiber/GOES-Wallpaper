@@ -1,0 +1,56 @@
+# Example overlays configuration for goes_wallpaper.py
+# Copy/edit this file (or pass --overlays-config path/to/other.toml) to change what's
+# drawn on top of the fetched satellite image. Any key omitted here falls back to the
+# script's built-in default; a missing file entirely means no overlays. See
+# OVERLAYS.md for the full schema and CONUS/Full Disk-only calibration caveat.
+
+# --- Graticule (lat/lon grid lines) ---
+[graticule]
+enabled = false
+step_deg = 10.0
+color = [255, 255, 0]
+opacity = 110    # 0-255
+
+# --- GeoJSON sources (optional; repeatable, each independently styled) ---
+# Static files that don't change cycle to cycle -- the composited layer is cached in
+# data_dir, keyed on each file's path/mtime plus this entry's name/style/satellite/
+# resolution, so an unchanged config only pays the parse/project/draw cost once.
+# Point/MultiPoint/LineString/MultiLineString/Polygon/MultiPolygon are all drawn; a
+# feature's `properties.color` ([r, g, b]) overrides `color` below for that one
+# feature, and a Point/MultiPoint's `properties.name` draws a text label next to the
+# marker. `name` here (not a feature property) must be unique across geojson_sources
+# -- it's part of the cache key/filename, and shows up in log lines.
+[[geojson_sources]]
+name = "cities"
+files = ["overlays/cities.geojson"]
+color = [255, 60, 60]
+marker_radius = 5     # base size at ~2000px width; scales up with resolution
+font_size = 18         # base size at ~2000px width; scales up with resolution
+
+# More examples:
+# [[geojson_sources]]
+# name = "counties"
+# files = ["overlays/counties.geojson", "overlays/coastline.geojson"]
+# color = [255, 255, 255]
+# line_width = 1
+# marker_radius = 5
+# opacity = 160
+# font_size = 14
+
+# --- Shell-command sources (optional; repeatable, each independently styled) ---
+# An external command run fresh every cycle (an argv list, not a shell string --
+# there's no shell parsing, so no shell-injection risk), whose stdout is parsed as
+# GeoJSON and drawn the same way geojson_sources is. Unlike geojson_sources this is
+# never cached, since the whole point of shelling out is presumably to pick up
+# genuinely fresh data (e.g. a script that fetches live NHC storm tracks or NIFC fire
+# perimeters and prints GeoJSON). A non-zero exit code, a timeout, or unparseable
+# stdout is logged and skipped rather than breaking the update cycle.
+# [[shell_sources]]
+# name = "storm_tracks"
+# command = ["python", "fetch_storms.py"]
+# timeout = 10.0
+# color = [0, 200, 255]
+# line_width = 2
+# marker_radius = 5
+# opacity = 200
+# font_size = 14

@@ -22,7 +22,7 @@ To port to a new OS: implement WallpaperPlatform below (platform_windows.py and
 platform_linux_kde.py are the reference implementations — every method in each was
 validated against real hardware, see their own docstrings) in a new
 platform_<name>.py, and add a branch in get_platform(). A backend for any other OS or
-desktop environment (GNOME, macOS, etc.) is welcome — none prioritized over another.
+desktop environment (GNOME, etc.) is welcome — none prioritized over another.
 
 Note: this module (and any platform_*.py) must never import from goes_wallpaper.py —
 goes_wallpaper.py already imports from here, so the reverse would be circular.
@@ -157,7 +157,7 @@ def get_platform(
     goes_wallpaper.main() passes Config.screen_width/screen_height here.
 
     "auto" (default) preserves today's sys.platform/XDG_CURRENT_DESKTOP sniffing
-    below. An explicit "windows"/"kde" short-circuits that sniffing entirely --
+    below. An explicit "windows"/"kde"/"macos" short-circuits that sniffing entirely --
     for forcing a backend under a session where env-var detection is unreliable, or
     for testing. "render" is a third explicit option: platform_render.
     RenderOnlyPlatform, which never applies a desktop wallpaper (see its module
@@ -174,6 +174,9 @@ def get_platform(
     if override == "kde":
         from platform_linux_kde import KDEPlatform
         return KDEPlatform()
+    if override == "macos":
+        from platform_macos import MacOSPlatform
+        return MacOSPlatform()
     if override == "render":
         from platform_render import RenderOnlyPlatform
         return RenderOnlyPlatform(render_fallback_width, render_fallback_height)
@@ -181,6 +184,9 @@ def get_platform(
     if sys.platform == "win32":
         from platform_windows import WindowsPlatform
         return WindowsPlatform()
+    if sys.platform == "darwin":
+        from platform_macos import MacOSPlatform
+        return MacOSPlatform()
     if sys.platform.startswith("linux"):
         desktop = (
             os.environ.get("XDG_CURRENT_DESKTOP", "")

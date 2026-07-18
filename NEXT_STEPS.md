@@ -153,42 +153,34 @@ A few non-obvious things learned while building and testing this, not really
    (`goes_wallpaper.py`) draw `LineString`/`Polygon`/`Multi*` GeoJSON features
    (state/county borders, storm tracks, fire perimeters), not just points, via the
    same `lonlat_to_pixels()` projection `draw_graticule` uses.
-7. **API/tool for lat/lon lookup** — `overlay_cities` entries need `lon`/`lat` typed
-   in by hand. A geocoding lookup would remove that friction. Needs a data-source
-   decision: bundled offline dataset (no network dependency, another thing to
-   vendor/maintain) vs. a geocoding API call (network dependency, rate limits,
-   offline behavior needs deciding).
-8. **Configurable overlay icons** — `overlay_cities` currently always draws a plain
-   circle marker. Custom per-marker icons would need an icon-path field on
-   `CityMarker`, image loading/caching, and compositing at the projected pixel
-   position (`Image.alpha_composite`, same pattern `draw_graticule` uses).
-9. **Plugin interface for overlays**, so overlay content isn't limited to the
-   hardcoded graticule/city-marker types — a registered provider could hit an API on
-   every refresh cycle for genuinely dynamic content (live weather alerts, flight or
-   ship positions, wildfire perimeters). Two minimal, hardcoded-slot first steps exist
-   in `goes_wallpaper.py`, both drawing through the shared `_build_geojson_layer`:
-   `overlay_shell_command` (runs one external command per cycle, no caching — the
-   point of shelling out is presumably fresh data every time) and
-   `overlay_geojson_files` (a static list of local file paths, merged and cached as an
-   RGBA PNG in `data_dir` keyed on each file's path+mtime plus
-   satellite/resolution/style — `render_static_geojson_overlay`/
-   `_geojson_files_cache_key`). Neither is the registered-plugin system below: each is
-   exactly one provider slot, not an arbitrary list of named ones.
-   Full shape: an `OverlayProvider` protocol (`fetch(source, now) -> features`,
-   `render(img, features, cfg) -> Image`) that `draw_overlays()` iterates over,
-   configured via `[[overlay_plugins]]` (same shape as `[[combos]]`), so multiple
-   providers of different kinds (several static GeoJSON file sets, a live HTTP
-   endpoint, several shell commands) can all run side by side instead of one of each.
-   Needs deciding: per-provider timeout/failure isolation generalized across an
-   arbitrary number of plugins (one broken API shouldn't break the whole update — both
-   existing single-slot providers already do this for themselves, but a loop over
-   `[[overlay_plugins]]` needs the same per-item isolation `per_monitor` combo mode
-   uses), a live-HTTP provider kind with its own rate-limit handling, and whether
-   providers need their own fetch cadence independent of the image refresh.
+7. **API/tool for lat/lon lookup** — city markers (`overlays/cities.geojson`, a
+   `geojson_sources` entry — see `OVERLAYS.md`) need `lon`/`lat` typed in by hand. A
+   geocoding lookup would remove that friction. Needs a data-source decision:
+   bundled offline dataset (no network dependency, another thing to vendor/maintain)
+   vs. a geocoding API call (network dependency, rate limits, offline behavior needs
+   deciding).
+8. **Configurable overlay icons** — `_build_geojson_layer` currently always draws a
+   plain circle marker for Point/MultiPoint features. Custom per-marker icons would
+   need an icon-path GeoJSON property (e.g. `properties.icon`, resolved the same way
+   `properties.color`/`properties.name` already are), image loading/caching, and
+   compositing at the projected pixel position (`Image.alpha_composite`, same
+   pattern `draw_graticule` uses).
+9. ~~**Plugin interface for overlays**~~ Partially done: `geojson_sources`/
+   `shell_sources` (`overlays.toml`, see `OVERLAYS.md`) are now repeatable, named,
+   independently-styled lists — multiple static GeoJSON file sets and/or multiple
+   shell commands can run side by side, each with its own per-item try/except
+   isolation (one broken source doesn't take the others down), closing the core gap
+   this item described. Still open, if picked up: a live-HTTP provider kind (hit an
+   API directly, not via a shelled-out script) with its own rate-limit handling, and
+   whether providers need their own fetch cadence independent of the image refresh —
+   today every source re-fetches/redraws exactly once per cycle, same as everything
+   else. `OverlaysConfig`/`GeoJSONSource`/`ShellSource` (`goes_wallpaper.py`) are the
+   landed shape; extending it with a third source *kind* (vs. more entries of the
+   existing two kinds) is what remains of the original "plugin interface" framing.
 10. ~~**Reduce prebaked config settings/magic numbers.**~~ Done: the overlay-sizing
     "reference width" scale factor is now the single `_OVERLAY_REFERENCE_WIDTH_PX`
     constant (`goes_wallpaper.py`), shared by `draw_graticule` and
-    `draw_city_markers` instead of each hardcoding `w / 2000` independently; the info
+    `_build_geojson_layer` instead of each hardcoding `w / 2000` independently; the info
     bar's minimum height is `_INFO_BAR_MIN_HEIGHT_PX` with a provenance comment
     (tuning floor, not a measurement); and `platform_windows.py`'s
     `_WALLPAPER_REGISTRY_CODES`/`_DESKTOP_WALLPAPER_POSITION` (two dicts mapping the
@@ -259,68 +251,51 @@ A few non-obvious things learned while building and testing this, not really
     doesn't handle cleanly — would need dedicated testing, possibly a documented
     fallback (skip power/network detection gracefully) if freezing that dependency
     turns out to be unreliable.
-15. **Improve config orthogonality/composability.** `Config` has accumulated several
-    near-duplicate field families instead of one shared shape reused across features.
-    Sharpest example, from the overlay-provider work above: `overlay_city_color`/
-    `overlay_city_marker_radius`/`overlay_city_font_size`, `overlay_shell_color`/
-    `overlay_shell_line_width`/`overlay_shell_marker_radius`/`overlay_shell_opacity`/
-    `overlay_shell_font_size`, and `overlay_geojson_color`/`overlay_geojson_line_width`/
-    `overlay_geojson_marker_radius`/`overlay_geojson_opacity`/`overlay_geojson_font_size`
-    are three separately-prefixed copies of the same underlying "overlay style" shape
-    (color/line width/marker radius/opacity/font size), repeated per provider instead
-    of defined once. The lack of composability is the same root cause:
-    `overlay_shell_command`/`overlay_geojson_files` are each exactly one hardcoded
-    provider slot (not a list), so there's no way to run two independently-styled
-    GeoJSON file sets, or two shell commands, at once. Item 9's `[[overlay_plugins]]`
-    design already points at the fix — a shared style sub-shape (e.g. an
-    `OverlayStyle` dataclass: color/line_width/marker_radius/opacity/font_size)
-    embedded once per `[[overlay_plugins]]` entry would eliminate the field-family
-    duplication *and* give composability for free, rather than being two separate
-    problems. Worth deciding whether to do this style-unification as its own
-    preparatory step before building the full plugin registry, or fold it into that
-    same change. Also worth a broader pass over `Config` for the same pattern
-    elsewhere (`combo_*`/`source_crop_*`/other prefix families) before the dataclass
-    grows further.
-16. **Per-combo overlay scoping.** All `overlay_*` config (`overlay_graticule`,
-    `overlay_cities`, `overlay_shell_command`, `overlay_geojson_files`) lives only on
-    the top-level `Config`, and `draw_overlays(img, cfg, source)` always draws from
-    that same global `cfg` — `EffectiveSource`/`Combo` carry no overlay fields at all,
-    unlike `satellite`/`sector`/`product`/`resolution`, which each combo *can* override
+15. ~~**Improve config orthogonality/composability.**~~ Done, and went further than
+    originally scoped: the three separately-prefixed copies of the overlay style
+    shape (`overlay_city_*`/`overlay_shell_*`/`overlay_geojson_*`) are now one
+    `GeoJSONSource`/`ShellSource` shape (color/line_width/marker_radius/opacity/
+    font_size), each entry independently styled. City markers didn't just get
+    re-styled onto the shared shape — `overlay_cities`/`CityMarker`/
+    `draw_city_markers` were deleted outright; a city is now a `Point` feature with
+    `properties.name` in a plain GeoJSON file (`overlays/cities.geojson`), drawn
+    through the exact same `geojson_sources` path as any other static content, one
+    fewer parallel mechanism rather than a fourth copy of the style shape. The
+    composability half landed too (see item 9): `geojson_sources`/`shell_sources`
+    are now repeatable lists, not one hardcoded slot each. Whole thing moved to its
+    own file, `overlays.toml` (not `config.toml`), since it's content, not app
+    behavior — see `OVERLAYS.md`. The broader pass over `Config` for the same
+    prefix-family pattern elsewhere (`combo_*`/`source_crop_*`) is still open, and
+    now scoped smaller since overlays (the biggest instance, 21 of ~70 fields) are
+    out of `Config` entirely.
+16. **Per-combo overlay scoping.** `overlays.toml` (`geojson_sources`/
+    `shell_sources`/`graticule`) is loaded once and passed to every combo's render
+    the same way — `EffectiveSource`/`Combo` carry no overlay fields at all, unlike
+    `satellite`/`sector`/`product`/`resolution`, which each combo *can* override
     (`combo.satellite or cfg.satellite`, see `resolve_source()`). So in `"rotate"`/
     `"per_monitor"` mode, every combo gets the exact same overlays today — there's no
     way to say "GOES18 CONUS GEOCOLOR gets city markers" and "GOES19 CONUS Band 13
     gets the live storm-track overlay" as two different combos, only all-or-nothing.
-    - **Decided: additive, not override.** The top-level `overlay_*` config stays a
-      *global* overlay set that always applies to every combo (today's behavior,
-      unchanged — `combo_mode = "single"` or any combo that doesn't care about
-      overlays needs zero new config). Each `Combo` can *additionally* carry its own
-      extra overlay content that layers on top *only* for that specific combo — e.g.
-      every combo gets the global graticule, but only the GOES19 storm-track combo
-      also gets that particular `overlay_shell_command`'s output composited on top of
-      it. Not a per-combo override/replacement of the global set — both draw, global
-      first, combo-specific second.
-    - Still needs a config shape decision for the per-combo half: mirror the
-      `combo.field or cfg.field` per-field-override pattern directly onto `Combo`
-      (simple, but multiplies the field-family duplication item 15 already flags), or
-      let a combo reference a named overlay set/preset defined once elsewhere and
-      reused across combos (less duplication, but a new indirection this config
-      format doesn't have anywhere else yet). Also needs deciding how a combo-specific
-      `overlay_geojson_files`/`overlay_shell_command` composes with the global one if
-      both are set for the same combo (concatenate the feature lists before one
-      draw pass, vs. two independent draw passes) — matters for cache-key design too
-      (see below), since "the same file list" and "two lists concatenated" shouldn't
-      collide in the cache.
-    - *Partially adjacent fix already shipped:* the global-config gap used to also
-      corrupt `overlay_geojson_files`'s cache — it lived at one fixed filename
-      regardless of satellite/resolution/style, so combos spanning more than one
-      satellite would invalidate and overwrite each other's cache every single cycle
-      (verified: alternating two satellites rebuilt on all 4 of 4 renders). Fixed by
-      keying the cache *filename* itself on (files, satellite, frame size, style) —
-      `_geojson_files_cache_id()` — so distinct combos now get independent cache
-      entries and no longer thrash. That only fixed the caching *correctness*
-      problem; the actual per-combo-overlay configurability this item describes is
-      still open, and whatever shape it takes needs to extend `_geojson_files_cache_id`
-      (or its equivalent) to also key on which combo-specific files were mixed in.
+    - **Decided: additive, not override.** The overlays.toml config stays a *global*
+      overlay set that always applies to every combo (today's behavior, unchanged —
+      `combo_mode = "single"` or any combo that doesn't care about overlays needs
+      zero new config). Each `Combo` can *additionally* carry its own extra overlay
+      content that layers on top *only* for that specific combo — e.g. every combo
+      gets the global graticule, but only the GOES19 storm-track combo also gets
+      that particular shell source's output composited on top of it. Not a
+      per-combo override/replacement of the global set — both draw, global first,
+      combo-specific second.
+    - The config shape decision this needs got easier since the multi-source work
+      (item 9): a combo could carry a list of `geojson_sources`/`shell_sources`
+      *names* to additionally draw (referencing entries already defined in
+      `overlays.toml`), rather than needing its own inline style fields — avoids
+      re-opening the field-family duplication item 15 just fixed. Still needs
+      deciding how a combo-specific reference composes with the global set in the
+      cache key (each `GeoJSONSource`'s cache entry is already keyed on that
+      source's own `name`, so a combo-specific *additional* source composites as its
+      own independent cache entry, layered on top — no new cache-key work needed
+      there, unlike when this item was originally scoped against the old
+      single-slot-per-provider shape).
 17. ~~**`DEFAULT_DATA_DIR` hardcodes Windows' AppData layout in the cross-platform
     core.**~~ Done: `WallpaperPlatform` gained `default_data_dir()`/
     `default_font_path()` abstract methods (implemented in `WindowsPlatform`), and
@@ -330,19 +305,19 @@ A few non-obvious things learned while building and testing this, not really
     are unchanged (still Windows paths) since they're what direct `Config()`
     construction — most of the test suite — relies on; a future Linux/macOS backend
     only needs to implement the two new methods, not touch Config or its defaults.
-18. **GeoJSON overlay providers aren't area-aware.** `overlay_geojson_files`/
-    `overlay_shell_command` call `lonlat_to_pixels(satellite, ...)` directly, so on a
-    `satpy_raw` Full Disk/Mesoscale frame — where `overlay_graticule`/
-    `overlay_cities` *do* work via the real per-frame `AreaInfo` — the GeoJSON
-    providers silently draw nothing (already noted in `draw_overlays`' docstring).
-    Thread `area` down through `_build_geojson_layer`/`_draw_lonlat_run` the same way
-    `draw_graticule` takes it. Cache-key note: `_geojson_files_cache_key`/`_cache_id`
-    would then need the area extent in the key (satellite alone no longer identifies
-    the projection once Full Disk and CONUS frames both render).
+18. **GeoJSON overlay providers aren't area-aware.** `geojson_sources`/
+    `shell_sources` call `lonlat_to_pixels(satellite, ...)` directly, so on a
+    `satpy_raw` Full Disk/Mesoscale frame — where `graticule` *does* work via the
+    real per-frame `AreaInfo` — the GeoJSON providers silently draw nothing (already
+    noted in `draw_overlays`' docstring). Thread `area` down through
+    `_build_geojson_layer`/`_draw_lonlat_run` the same way `draw_graticule` takes
+    it. Cache-key note: `_geojson_files_cache_key`/`_cache_id` would then need the
+    area extent in the key (satellite alone no longer identifies the projection once
+    Full Disk and CONUS frames both render).
 19. **Nothing prunes stale `overlay_geojson_cache_*.png` entries** in `data_dir`
-    (README documents this). Each distinct (files, satellite, frame size, style)
-    combination mints a new pair of files; old ones are left behind forever after a
-    config change. Full-frame RGBA PNGs at 5000x3000 aren't tiny — a cheap fix is
+    (`OVERLAYS.md` documents this). Each distinct (name, files, satellite, frame
+    size, style) combination mints a new pair of files; old ones are left behind
+    forever after a config change. Full-frame RGBA PNGs at 5000x3000 aren't tiny — a cheap fix is
     deleting cache files whose `.json` sidecar hasn't matched in N days, or capping
     the count. Fold into whatever cache shape gap 16's per-combo work lands on.
 20. ~~**Platform selection is hardcoded, not configurable.**~~ Done: `platform`
@@ -378,3 +353,22 @@ A few non-obvious things learned while building and testing this, not really
     pixels) directly instead of warping pixels already drawn in the source grid —
     would also want `pyresample`/similar for the base-image resampling at that
     point, since it'd be adding a real dependency anyway.
+22. **A third backend now exists (`platform_macos.MacOSPlatform`) and single-monitor
+    wallpaper apply is verified on real hardware**, the same milestone item 11
+    documents for the KDE backend. A live run on a real MacBook with a single
+    (built-in) display confirmed the default (`combo_mode = "single"`) path end to
+    end: `get_screen_size()` detection, the Cocoa-bottom-up-to-top-down coordinate
+    flip, and `apply_wallpaper()`'s `NSWorkspace.setDesktopImageURL_forScreen_
+    options_error_` call and style mapping (including the "tile"/"span" → "fill"
+    degradation) all behaved as documented, and `get_taskbar_height`'s
+    `visibleFrame.origin.y` Dock-height reasoning matched the real Dock. Still
+    outstanding, only exercised via the unit tests' mocked output so far, not live
+    hardware: `list_monitors`/`apply_wallpaper_per_monitor` against real
+    multi-monitor geometry (needs an external display), and `get_power_state`'s
+    `pmset -g batt` parsing on battery (including the no-battery-present desktop-Mac
+    case). Whoever picks this up next should run these remaining paths against a
+    real Mac (ideally with an external monitor to exercise `list_monitors`/
+    `apply_wallpaper_per_monitor`, and on battery to exercise `get_power_state`)
+    and update `platform_macos.py`'s module docstring plus README's "macOS backend"
+    section with what's actually confirmed, the same way item 11 documents KDE's
+    remaining verification gaps.

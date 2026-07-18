@@ -265,11 +265,11 @@ class TestDrawGeojsonOverlay:
 
 
 class TestDrawOverlaysWiring:
-    """Covers overlay_shell_command specifically through draw_overlays() -- the other
+    """Covers shell_sources specifically through draw_overlays() -- the other
     functions above call fetch_shell_geojson/draw_geojson_overlay directly, which
-    proves the pieces work but not that draw_overlays actually wires cfg.
-    overlay_shell_command/overlay_shell_* through to them, or that a broken command
-    is isolated the way overlay_geojson_files already is (see
+    proves the pieces work but not that draw_overlays actually wires each
+    ShellSource's command/style through to them, or that a broken command is
+    isolated the way geojson_sources already is (see
     tests/test_overlay_geojson_files.py::TestDrawOverlaysWiring)."""
 
     def _blank(self):
@@ -281,30 +281,52 @@ class TestDrawOverlaysWiring:
     def _source(self):
         return gw.resolve_source(gw.Config(satellite="GOES18", sector="CONUS"), None)
 
-    def test_overlay_shell_command_alone_triggers_draw_overlays(self):
+    def test_shell_source_alone_triggers_draw_overlays(self):
         payload = {
             "type": "FeatureCollection",
             "features": [
                 {"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [-122.42, 37.77]}},
             ],
         }
-        cfg = gw.Config(overlay_shell_command=_print_json_command(payload))
-        out = gw.draw_overlays(self._blank(), cfg, self._source())
+        cfg = gw.Config()
+        overlays = gw.OverlaysConfig(shell_sources=(gw.ShellSource(name="storms", command=_print_json_command(payload)),))
+        out = gw.draw_overlays(self._blank(), cfg, overlays, self._source())
         assert self._nonblack_pixel_count(out) > 0
 
     def test_nonzero_exit_command_does_not_crash_draw_overlays(self):
-        cfg = gw.Config(overlay_shell_command=(sys.executable, "-c", "import sys; sys.exit(1)"))
-        out = gw.draw_overlays(self._blank(), cfg, self._source())  # must not raise
+        cfg = gw.Config()
+        command = (sys.executable, "-c", "import sys; sys.exit(1)")
+        overlays = gw.OverlaysConfig(shell_sources=(gw.ShellSource(name="storms", command=command),))
+        out = gw.draw_overlays(self._blank(), cfg, overlays, self._source())  # must not raise
         assert self._nonblack_pixel_count(out) == 0
 
     def test_invalid_json_command_does_not_crash_draw_overlays(self):
-        cfg = gw.Config(overlay_shell_command=(sys.executable, "-c", "print('not json')"))
-        out = gw.draw_overlays(self._blank(), cfg, self._source())  # must not raise
+        cfg = gw.Config()
+        command = (sys.executable, "-c", "print('not json')")
+        overlays = gw.OverlaysConfig(shell_sources=(gw.ShellSource(name="storms", command=command),))
+        out = gw.draw_overlays(self._blank(), cfg, overlays, self._source())  # must not raise
         assert self._nonblack_pixel_count(out) == 0
 
     def test_command_returning_non_geojson_json_does_not_crash_draw_overlays(self):
         # valid JSON, but not GeoJSON-shaped (no recognizable "type") -- exercises the
         # try/except around draw_geojson_overlay itself, not just fetch_shell_geojson.
-        cfg = gw.Config(overlay_shell_command=_print_json_command({"unrelated": "payload"}))
-        out = gw.draw_overlays(self._blank(), cfg, self._source())  # must not raise
+        cfg = gw.Config()
+        command = _print_json_command({"unrelated": "payload"})
+        overlays = gw.OverlaysConfig(shell_sources=(gw.ShellSource(name="storms", command=command),))
+        out = gw.draw_overlays(self._blank(), cfg, overlays, self._source())  # must not raise
         assert self._nonblack_pixel_count(out) == 0
+
+    def test_one_broken_shell_source_does_not_prevent_others_from_drawing(self):
+        payload = {
+            "type": "FeatureCollection",
+            "features": [
+                {"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [-122.42, 37.77]}},
+            ],
+        }
+        cfg = gw.Config()
+        overlays = gw.OverlaysConfig(shell_sources=(
+            gw.ShellSource(name="broken", command=(sys.executable, "-c", "import sys; sys.exit(1)")),
+            gw.ShellSource(name="good", command=_print_json_command(payload)),
+        ))
+        out = gw.draw_overlays(self._blank(), cfg, overlays, self._source())  # must not raise
+        assert self._nonblack_pixel_count(out) > 0

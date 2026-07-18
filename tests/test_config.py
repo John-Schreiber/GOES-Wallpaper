@@ -85,32 +85,6 @@ class TestLoadConfig:
         cfg = gw.load_config(p, {})
         assert cfg.retry_statuses == (500, 502)
 
-    def test_color_fields_become_tuples(self, tmp_path):
-        p = write_toml(tmp_path, "overlay_graticule_color = [1, 2, 3]\noverlay_city_color = [4, 5, 6]\n")
-        cfg = gw.load_config(p, {})
-        assert cfg.overlay_graticule_color == (1, 2, 3)
-        assert cfg.overlay_city_color == (4, 5, 6)
-
-    def test_overlay_shell_command_becomes_tuple(self, tmp_path):
-        p = write_toml(tmp_path, 'overlay_shell_command = ["python", "fetch.py"]\n')
-        cfg = gw.load_config(p, {})
-        assert cfg.overlay_shell_command == ("python", "fetch.py")
-
-    def test_overlay_shell_color_becomes_tuple(self, tmp_path):
-        p = write_toml(tmp_path, "overlay_shell_color = [7, 8, 9]\n")
-        cfg = gw.load_config(p, {})
-        assert cfg.overlay_shell_color == (7, 8, 9)
-
-    def test_overlay_geojson_files_becomes_tuple(self, tmp_path):
-        p = write_toml(tmp_path, 'overlay_geojson_files = ["a.geojson", "b.geojson"]\n')
-        cfg = gw.load_config(p, {})
-        assert cfg.overlay_geojson_files == ("a.geojson", "b.geojson")
-
-    def test_overlay_geojson_color_becomes_tuple(self, tmp_path):
-        p = write_toml(tmp_path, "overlay_geojson_color = [10, 11, 12]\n")
-        cfg = gw.load_config(p, {})
-        assert cfg.overlay_geojson_color == (10, 11, 12)
-
     def test_combos_parsed_into_dataclasses(self, tmp_path):
         p = write_toml(tmp_path, '''
 combo_mode = "rotate"
@@ -139,28 +113,6 @@ bogus_key = 1
 ''')
         with pytest.raises(ValueError, match=r"combos\[0\]"):
             gw.load_config(p, {})
-
-    def test_overlay_cities_parsed_into_dataclasses(self, tmp_path):
-        p = write_toml(tmp_path, '''
-[[overlay_cities]]
-name = "SF"
-lon = -122.42
-lat = 37.77
-''')
-        cfg = gw.load_config(p, {})
-        assert len(cfg.overlay_cities) == 1
-        assert isinstance(cfg.overlay_cities[0], gw.CityMarker)
-        assert cfg.overlay_cities[0].name == "SF"
-
-    def test_unknown_overlay_city_key_raises(self, tmp_path):
-        p = write_toml(tmp_path, '''
-[[overlay_cities]]
-name = "SF"
-bogus_key = 1
-''')
-        with pytest.raises(ValueError, match=r"overlay_cities\[0\]"):
-            gw.load_config(p, {})
-
 
 class TestValidateCombos:
     def test_single_mode_always_valid(self):
@@ -366,6 +318,9 @@ class TestValidatePlatform:
 
     def test_kde_is_valid(self):
         gw.validate_platform(gw.Config(platform="kde"))  # no raise
+
+    def test_macos_is_valid(self):
+        gw.validate_platform(gw.Config(platform="macos"))  # no raise
 
     def test_render_is_valid(self):
         gw.validate_platform(gw.Config(platform="render"))  # no raise
