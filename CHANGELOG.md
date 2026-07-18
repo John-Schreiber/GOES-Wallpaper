@@ -5,6 +5,23 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Single-instance locking.** A second goes_wallpaper process (e.g. a duplicate
+  `--loop` started without noticing the first was still running) now exits
+  immediately with an error instead of racing the first for the same `data_dir`'s
+  `state.json`/`wallpaper.jpg`/`log.txt`. Previously nothing coordinated concurrent
+  instances, so whichever cycle finished last silently won regardless of which one
+  actually fetched the fresher capture — able to leave the applied wallpaper *staler*
+  than either instance would ever produce alone, with nothing in the log to explain
+  why. The lock (`goes_wallpaper.lock` in `data_dir`) is an OS-level advisory lock
+  held for the process's lifetime (`fcntl.flock`/`msvcrt.locking`), so it's released
+  automatically even on a crash or kill — no stale-lock-file cleanup required. See
+  `acquire_instance_lock`.
+- Startup now logs the running version and git commit (e.g. `goes_wallpaper 2.2.0
+  (375cc69) starting, pid 12345`), so a long-running `--loop` process (or a stray
+  leftover one from an old checkout/branch) can be identified from `log.txt` alone.
+  Commit resolution is best-effort (`git rev-parse --short HEAD` next to the script)
+  and logs `"no git checkout detected"` for a packaged install or zip download
+  instead of failing.
 - **Overlay GeoJSON cache pruning.** `overlay_geojson_cache_*.png`/`.json` pairs
   in `data_dir` orphaned by a removed/renamed `geojson_sources` entry, or one
   that changed satellite/resolution/style (minting a new cache identity), are
@@ -23,6 +40,21 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   battery/network detection report "unknown" — no hardware to ask. Unlike
   `"windows"`/`"kde"`, it's never chosen by `"auto"` detection; opt in explicitly via
   config.toml. See README's "Render-only backend" section.
+
+### Fixed
+- `avoid_taskbar` did nothing useful for a left/right-docked taskbar —
+  `WindowsPlatform.get_taskbar_height()` read `Shell_TrayWnd`'s window rect height
+  unconditionally, which for a side-docked taskbar is the full screen height, so the
+  info bar was nudged up by roughly a screen's worth of pixels and composited
+  off-image (silently no info bar at all, since `avoid_taskbar` defaults on). Now
+  uses `SHAppBarMessage(ABM_GETTASKBARPOS)` to read the taskbar's actual docked edge
+  and only applies a margin when it's at the bottom.
+- `combo_mode = "rotate"` could schedule `--loop`'s next wake-up from the wrong
+  combo's learned capture phase — `run_loop` used `state["last_source_key"]`, the
+  combo just fetched, but the *next* cycle fetches the next combo in rotation, whose
+  publish phase (different satellite/sector/product) can differ. `run_loop` now
+  computes the phase from the upcoming combo (`state["combo_rotation_index"]`,
+  already advanced before state is saved) instead.
 
 ### Changed — BREAKING: overlays moved out of config.toml
 

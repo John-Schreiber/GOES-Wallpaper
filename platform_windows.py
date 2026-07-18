@@ -71,6 +71,26 @@ _WALLPAPER_STYLE_CODES = {
     "span": _StyleCodes("22", "0", 5),
 }
 
+class _APPBARDATA(ctypes.Structure):
+    """Shell_AppBar.h's APPBARDATA, for SHAppBarMessage(ABM_GETTASKBARPOS) --
+    reports which screen edge the taskbar is docked to (uEdge) and its rect (rc),
+    unlike GetWindowRect on Shell_TrayWnd which only gives the rect."""
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("hWnd", wintypes.HWND),
+        ("uCallbackMessage", wintypes.UINT),
+        ("uEdge", wintypes.UINT),
+        ("rc", wintypes.RECT),
+        ("lParam", wintypes.LPARAM),
+    ]
+
+
+_ABM_GETTASKBARPOS = 0x00000005
+_ABE_LEFT = 0
+_ABE_TOP = 1
+_ABE_RIGHT = 2
+_ABE_BOTTOM = 3
+
 _CLSID_DESKTOP_WALLPAPER = GUID("{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}")
 
 
@@ -194,14 +214,24 @@ class WindowsPlatform(WallpaperPlatform):
         return width, height
 
     def get_taskbar_height(self) -> int:
+        # Shell_TrayWnd's own window rect is the taskbar's full extent regardless of
+        # which screen edge it's docked to -- a left/right-docked taskbar's rect is
+        # the full screen *height*, not the bar's thickness, so reading rect height
+        # unconditionally would nudge the info bar up by roughly a screen's worth of
+        # pixels (composited off-image, so avoid_taskbar's default-on silently
+        # produces no visible info bar for anyone with a side-docked taskbar). Ask
+        # the shell for the taskbar's actual edge via SHAppBarMessage instead, and
+        # only return a margin when it's docked at the bottom.
         user32 = ctypes.windll.user32
         hwnd = user32.FindWindowW("Shell_TrayWnd", None)
         if not hwnd:
             return 0
-        rect = wintypes.RECT()
-        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        data = _APPBARDATA(cbSize=ctypes.sizeof(_APPBARDATA), hWnd=hwnd)
+        if not ctypes.windll.shell32.SHAppBarMessage(_ABM_GETTASKBARPOS, ctypes.byref(data)):
             return 0
-        return max(0, rect.bottom - rect.top)
+        if data.uEdge != _ABE_BOTTOM:
+            return 0
+        return max(0, data.rc.bottom - data.rc.top)
 
     def apply_wallpaper(self, path: Path, style: str) -> None:
         import winreg

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import io
 import json
 import logging
@@ -50,7 +51,7 @@ from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import numpy as np
 import requests
@@ -432,6 +433,10 @@ class Config:
     def log_path(self) -> Path:
         return self.data_dir / "log.txt"
 
+    @property
+    def lock_path(self) -> Path:
+        return self.data_dir / "goes_wallpaper.lock"
+
 
 def load_config(config_path: Path, overrides: dict[str, Any], platform: WallpaperPlatform | None = None) -> Config:
     """Build a Config from an optional TOML file, then apply CLI overrides on top.
@@ -735,6 +740,47 @@ def resolve_source(cfg: Config, combo: Combo | None) -> EffectiveSource:
 # Logging
 # --------------------------------------------------------------------------- #
 
+def _package_version() -> str:
+    """The version string to log at startup. Reads pyproject.toml next to this script
+    when running from a source checkout (the common case -- see the module docstring:
+    `python goes_wallpaper.py` / `pythonw.exe goes_wallpaper.py`); falls back to
+    installed-package metadata for a packaged install where pyproject.toml isn't
+    shipped alongside the script. "unknown" if neither resolves, rather than raising
+    -- this is diagnostic sugar for logs, never something a cycle should fail over."""
+    pyproject_path = Path(__file__).with_name("pyproject.toml")
+    try:
+        with pyproject_path.open("rb") as f:
+            return tomllib.load(f)["project"]["version"]
+    except (OSError, tomllib.TOMLDecodeError, KeyError):
+        pass
+    try:
+        return importlib.metadata.version("goes-wallpaper")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _commit_hash() -> str | None:
+    """Short git commit hash of the checkout this script is running from, or None if
+    it's not a git checkout (a packaged install, a zip download, git not on PATH,
+    etc.) -- logged alongside _package_version() so a long-running --loop process
+    (or a stray leftover one from an old checkout/branch) can be identified from
+    log.txt alone, without needing to know which directory it was launched from."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
 def setup_logging(cfg: Config) -> None:
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
@@ -750,6 +796,64 @@ def setup_logging(cfg: Config) -> None:
     root.setLevel(cfg.log_level)
     root.handlers.clear()
     root.addHandler(handler)
+
+    commit = _commit_hash()
+    logging.info(
+        "goes_wallpaper %s (%s) starting, pid %d",
+        _package_version(), commit or "no git checkout detected", os.getpid(),
+    )
+
+
+def acquire_instance_lock(cfg: Config) -> BinaryIO | None:
+    """Prevent two goes_wallpaper processes from running against the same data_dir at
+    once. Nothing coordinates concurrent writes to state.json/wallpaper.jpg/log.txt --
+    two racing instances (e.g. a second --loop started without noticing the first was
+    still running) each learn their own capture phase and apply whichever cycle
+    happens to finish last, which can silently leave a *staler* frame applied than
+    either instance would ever produce alone, with nothing in the log to explain why.
+
+    Returns an open file handle the caller must keep referenced for the process's
+    entire lifetime -- the lock is an OS-level advisory lock tied to that handle
+    (fcntl.flock on POSIX, msvcrt.locking on Windows), released automatically, even
+    on a crash or kill, whenever the handle closes. That means there's no stale
+    lock-file/PID bookkeeping to get wrong: an old lock left by a process that's
+    genuinely gone is released the moment that process's handle table goes away, not
+    based on guessing from a PID or timestamp.
+
+    Returns None (after logging why) if another live process already holds it --
+    callers should treat that as fatal and exit rather than proceed unlocked."""
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    handle = cfg.lock_path.open("a+b")
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        # A byte-range lock needs a byte to range over; a brand-new file has none.
+        handle.write(b"\0")
+        handle.flush()
+
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        logging.error(
+            "Another goes_wallpaper process already has %s locked -- exiting instead "
+            "of racing it for state.json/wallpaper.jpg/log.txt in %s.",
+            cfg.lock_path, cfg.data_dir,
+        )
+        return None
+
+    # Byte 0 stays reserved for the lock itself (never rewritten); diagnostics from
+    # byte 1 on are just for a human inspecting the file, not read back by any code.
+    handle.seek(1)
+    handle.truncate()
+    handle.write(f"pid={os.getpid()}".encode("ascii"))
+    handle.flush()
+    return handle
 
 
 # --------------------------------------------------------------------------- #
@@ -2198,12 +2302,29 @@ _CYCLE_FUNCS = {
 }
 
 
+def _next_cycle_source_key(cfg: Config, state: dict[str, Any]) -> str | None:
+    """The source key whose learned capture phase should drive run_loop's next
+    wake-up: the source that will actually be fetched *next* cycle, not just
+    whichever one state["last_source_key"] recorded. In "rotate" mode those
+    differ — last_source_key is the combo just fetched, but combo_rotation_index
+    (already advanced by run_once_rotate before it saved state) points at the
+    *upcoming* combo, whose publish phase (different satellite/sector/product)
+    may not match. "single" mode has no such gap (same source every cycle, so
+    last_source_key already names it); "per_monitor" mode fetches several
+    sources per cycle, so there's no single phase to target — falls back to
+    plain clock-boundary alignment via the None here."""
+    if cfg.combo_mode == "rotate" and cfg.combos:
+        index = state.get("combo_rotation_index", 0) % len(cfg.combos)
+        return resolve_source(cfg, cfg.combos[index]).key
+    return state.get("last_source_key")
+
+
 def run_loop(cfg: Config, overlays: OverlaysConfig, session: requests.Session, platform: WallpaperPlatform) -> None:
     """Run indefinitely, waking on drift-corrected boundaries instead of naive sleep(),
     so the effective cadence doesn't creep as each cycle's own runtime accumulates.
     When sync_to_capture_time is enabled, the boundary itself is nudged to line up
     with when fresh frames actually post rather than the raw clock tick — driven by
-    whichever source state["last_source_key"] points at (unset in "per_monitor" mode,
+    whichever source _next_cycle_source_key points at (unset in "per_monitor" mode,
     since multiple sources are fetched per cycle there; falls back to plain
     clock-boundary alignment in that case)."""
     cycle = _CYCLE_FUNCS[cfg.combo_mode]
@@ -2215,7 +2336,7 @@ def run_loop(cfg: Config, overlays: OverlaysConfig, session: requests.Session, p
 
         state = load_state(cfg)
         now = time.time()
-        key = state.get("last_source_key")
+        key = _next_cycle_source_key(cfg, state)
         sstate = state.get("sources", {}).get(key, {}) if key else {}
         next_run = compute_next_run(cfg, sstate, now)
         next_run += cfg.jitter_seconds * (0.5 - _rand_unit())
@@ -2293,22 +2414,28 @@ def main(argv: list[str] | None = None) -> int:
     validate_platform(cfg)
     setup_logging(cfg)
 
-    overlays = load_overlays_config(args.overlays_config)
-    validate_overlays_config(overlays)
-
-    session = build_session(cfg)
-    try:
-        if cfg.loop:
-            run_loop(cfg, overlays, session, platform)
-        else:
-            _CYCLE_FUNCS[cfg.combo_mode](cfg, overlays, session, platform)
-    except KeyboardInterrupt:
-        logging.info("Interrupted, exiting")
-        return 130
-    except Exception:
-        logging.exception("Unhandled exception while running goes_wallpaper")
+    lock_handle = acquire_instance_lock(cfg)
+    if lock_handle is None:
         return 1
-    return 0
+    try:
+        overlays = load_overlays_config(args.overlays_config)
+        validate_overlays_config(overlays)
+
+        session = build_session(cfg)
+        try:
+            if cfg.loop:
+                run_loop(cfg, overlays, session, platform)
+            else:
+                _CYCLE_FUNCS[cfg.combo_mode](cfg, overlays, session, platform)
+        except KeyboardInterrupt:
+            logging.info("Interrupted, exiting")
+            return 130
+        except Exception:
+            logging.exception("Unhandled exception while running goes_wallpaper")
+            return 1
+        return 0
+    finally:
+        lock_handle.close()
 
 
 if __name__ == "__main__":
