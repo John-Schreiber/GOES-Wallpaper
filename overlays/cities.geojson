@@ -1,0 +1,20 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {"type": "Point", "coordinates": [-70.2568, 43.6591]},
+      "properties": {"name": "Portland, ME"}
+    },
+    {
+      "type": "Feature",
+      "geometry": {"type": "Point", "coordinates": [-122.42, 37.77]},
+      "properties": {"name": "San Francisco"}
+    },
+    {
+      "type": "Feature",
+      "geometry": {"type": "Point", "coordinates": [-104.99, 39.74]},
+      "properties": {"name": "Denver"}
+    }
+  ]
+}
