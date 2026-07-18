@@ -367,6 +367,9 @@ class TestValidatePlatform:
     def test_kde_is_valid(self):
         gw.validate_platform(gw.Config(platform="kde"))  # no raise
 
+    def test_render_is_valid(self):
+        gw.validate_platform(gw.Config(platform="render"))  # no raise
+
     def test_bogus_platform_raises(self):
         with pytest.raises(ValueError, match="platform must be one of"):
             gw.validate_platform(gw.Config(platform="bogus"))

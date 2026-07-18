@@ -145,15 +145,24 @@ def get_platform(override: str = "auto") -> WallpaperPlatform:
     "auto" (default) preserves today's sys.platform/XDG_CURRENT_DESKTOP sniffing
     below. An explicit "windows"/"kde" short-circuits that sniffing entirely --
     for forcing a backend under a session where env-var detection is unreliable, or
-    for testing. Config.platform (goes_wallpaper.py) is validated against the same
-    set of names by validate_platform() before this is called, so an unrecognized
-    value never reaches here."""
+    for testing. "render" is a third explicit option: platform_render.
+    RenderOnlyPlatform, which never applies a desktop wallpaper (see its module
+    docstring) -- for headless boxes with no desktop shell at all, typically paired
+    with Config.render_to. Unlike "windows"/"kde", "render" is never chosen by
+    "auto" detection below, even on an unrecognized OS/desktop -- it's opt-in only,
+    so an unsupported real desktop still raises rather than silently doing nothing.
+    Config.platform (goes_wallpaper.py) is validated against the same set of names
+    by validate_platform() before this is called, so an unrecognized value never
+    reaches here."""
     if override == "windows":
         from platform_windows import WindowsPlatform
         return WindowsPlatform()
     if override == "kde":
         from platform_linux_kde import KDEPlatform
         return KDEPlatform()
+    if override == "render":
+        from platform_render import RenderOnlyPlatform
+        return RenderOnlyPlatform()
 
     if sys.platform == "win32":
         from platform_windows import WindowsPlatform
@@ -173,12 +182,17 @@ def get_platform(override: str = "auto") -> WallpaperPlatform:
             "on Linux. To add another: implement platform_base.WallpaperPlatform in "
             "a new platform_<name>.py and add a branch here. Or, if this is actually "
             "a KDE session that XDG_CURRENT_DESKTOP/XDG_SESSION_DESKTOP just didn't "
-            "identify correctly, set `platform = \"kde\"` in config.toml to force it."
+            "identify correctly, set `platform = \"kde\"` in config.toml to force it. "
+            "If there's no desktop shell at all (a headless box/container/CI) and "
+            "you just want the rendered image(s), set `platform = \"render\"` "
+            "instead -- see platform_render.RenderOnlyPlatform."
         )
     raise NotImplementedError(
         f"No WallpaperPlatform backend for sys.platform={sys.platform!r} yet.\n"
         "To add one: implement platform_base.WallpaperPlatform (see "
         "platform_windows.WindowsPlatform or platform_linux_kde.KDEPlatform for "
         "reference implementations) in a new platform_<name>.py, and add a branch "
-        "here."
+        "here. If there's no desktop shell at all (a headless box/container/CI) "
+        "and you just want the rendered image(s), set `platform = \"render\"` "
+        "instead -- see platform_render.RenderOnlyPlatform."
     )

@@ -165,8 +165,11 @@ class Config:
     # Which platform_base.WallpaperPlatform backend to use. "auto" (default)
     # detects from sys.platform / XDG_CURRENT_DESKTOP, same as always -- explicit
     # "windows"/"kde" short-circuit that detection, e.g. for a KDE session whose
-    # XDG_CURRENT_DESKTOP isn't set reliably. See platform_base.get_platform().
-    platform: str = "auto"  # "auto" | "windows" | "kde"
+    # XDG_CURRENT_DESKTOP isn't set reliably. "render" opts into the render-only
+    # backend (never applies a desktop wallpaper; for headless boxes/containers/CI --
+    # see platform_render.RenderOnlyPlatform) and, unlike the other two, is never
+    # chosen by "auto". See platform_base.get_platform().
+    platform: str = "auto"  # "auto" | "windows" | "kde" | "render"
 
     # Output
     # This class-level default is Windows-specific and only applies when Config is
@@ -574,7 +577,7 @@ def validate_output_projection(cfg: Config) -> None:
             )
 
 
-_VALID_PLATFORMS = {"auto", "windows", "kde"}
+_VALID_PLATFORMS = {"auto", "windows", "kde", "render"}
 
 
 def validate_platform(cfg: Config) -> None:

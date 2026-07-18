@@ -346,9 +346,14 @@ A few non-obvious things learned while building and testing this, not really
     deleting cache files whose `.json` sidecar hasn't matched in N days, or capping
     the count. Fold into whatever cache shape gap 16's per-combo work lands on.
 20. ~~**Platform selection is hardcoded, not configurable.**~~ Done: `platform`
-    config setting (`"auto"` default, or explicit `"windows"`/`"kde"`) short-circuits
-    `get_platform()`'s `sys.platform`/`XDG_CURRENT_DESKTOP` sniffing. config.toml
-    only — no CLI flag yet.
+    config setting (`"auto"` default, or explicit `"windows"`/`"kde"`/`"render"`)
+    short-circuits `get_platform()`'s `sys.platform`/`XDG_CURRENT_DESKTOP` sniffing.
+    config.toml only — no CLI flag yet. `"render"` (`platform_render.
+    RenderOnlyPlatform`) is a third, non-hardware-backed option added alongside this:
+    every method is a fixed fallback or a no-op (never applies a desktop wallpaper),
+    for headless boxes/containers/CI where only the rendered image (`render_to`)
+    matters — see README's "Render-only backend" section. Unlike `"windows"`/`"kde"`,
+    it's never chosen by `"auto"`.
 21. **Reprojection (`output_projection`) is low quality: nearest-neighbor only, and
     warps already-drawn overlays instead of redrawing them.** Two related issues in
     `reproject_frame`, both visible in `PROJECTIONS.md`'s gallery:

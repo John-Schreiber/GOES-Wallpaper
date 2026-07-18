@@ -13,8 +13,11 @@
 # Which platform_base.WallpaperPlatform backend to use. "auto" (default) detects
 # from sys.platform / XDG_CURRENT_DESKTOP, same as always. Set this explicitly only
 # if that detection picks the wrong backend or fails (e.g. a KDE session whose
-# XDG_CURRENT_DESKTOP/XDG_SESSION_DESKTOP isn't set the way Plasma normally sets it).
-# platform = "kde"  # "auto" | "windows" | "kde"
+# XDG_CURRENT_DESKTOP/XDG_SESSION_DESKTOP isn't set the way Plasma normally sets it),
+# or if there's no desktop shell at all (a headless box/container/CI) and you just
+# want the rendered image(s) via render_to below -- "render" never applies a desktop
+# wallpaper and is never chosen by "auto", so it must be set explicitly.
+# platform = "kde"  # "auto" | "windows" | "kde" | "render"
 
 # --- Source image ---
 satellite = "GOES19"      # GOES19 (East) or GOES18 (West)

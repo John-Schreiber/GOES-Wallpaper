@@ -2,6 +2,17 @@
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- `platform = "render"` — a third `WallpaperPlatform` backend
+  (`platform_render.RenderOnlyPlatform`) for headless boxes with no desktop shell at
+  all (a server, a container, an SSH session, CI): `apply_wallpaper`/
+  `apply_wallpaper_per_monitor` are no-ops, screen size/monitor detection fall back to
+  a fixed 1920×1080, and battery/network detection report "unknown" — no hardware to
+  ask. Unlike `"windows"`/`"kde"`, it's never chosen by `"auto"` detection; opt in
+  explicitly via config.toml. See README's "Render-only backend" section.
+
 ## [2.2.0] — 2026-07-18 — KDE Plasma backend, reprojection, lon/lat crop
 
 ### Added

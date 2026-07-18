@@ -76,5 +76,6 @@ include = [
     "platform_base.py",
     "platform_windows.py",
     "platform_linux_kde.py",
+    "platform_render.py",
     "source_satpy.py",
 ]

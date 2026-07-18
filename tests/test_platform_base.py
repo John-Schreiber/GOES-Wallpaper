@@ -6,8 +6,9 @@
 # (see pyproject.toml's sys_platform == 'win32' markers) -- so real "windows"
 # override coverage is skipped on other platforms, matching CI's approach for the
 # rest of the suite (platform-dependent logic tested via a stub, real backends only
-# exercised on their own OS). platform_linux_kde.py has no OS-locked imports (plain
-# subprocess/shutil/json), so its override path is exercised for real everywhere.
+# exercised on their own OS). platform_linux_kde.py and platform_render.py have no
+# OS-locked imports (plain subprocess/shutil/json, or os/pathlib respectively), so
+# their override paths are exercised for real everywhere.
 
 import sys
 
@@ -36,6 +37,21 @@ class TestGetPlatformOverride:
         from platform_windows import WindowsPlatform
 
         assert isinstance(platform_base.get_platform("windows"), WindowsPlatform)
+
+    def test_render_override_returns_render_only_platform(self):
+        from platform_render import RenderOnlyPlatform
+
+        assert isinstance(platform_base.get_platform("render"), RenderOnlyPlatform)
+
+    def test_render_override_bypasses_environment_sniffing(self, monkeypatch):
+        # Same "would fail 'auto' detection, but the explicit override still wins"
+        # shape as the KDE override tests above -- "render" doesn't even try to
+        # detect anything, so this mostly documents that it's unaffected by env.
+        monkeypatch.delenv("XDG_CURRENT_DESKTOP", raising=False)
+        monkeypatch.delenv("XDG_SESSION_DESKTOP", raising=False)
+        from platform_render import RenderOnlyPlatform
+
+        assert isinstance(platform_base.get_platform("render"), RenderOnlyPlatform)
 
 
 class TestGetPlatformAutoDetection:
