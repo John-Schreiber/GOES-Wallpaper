@@ -196,3 +196,127 @@ class TestValidateSourceKind:
         cfg = gw.Config(combos=(gw.Combo(name="a", source_kind="bogus"),))
         with pytest.raises(ValueError, match=r"combos\['a'\].source_kind must be one of"):
             gw.validate_source_kind(cfg)
+
+
+class TestValidateLonlatCropBounds:
+    def test_default_is_valid(self):
+        gw.validate_lonlat_crop_bounds(gw.Config())  # no raise
+
+    def test_all_four_set_and_valid_passes(self):
+        cfg = gw.Config(source_crop_min_lon=-110.0, source_crop_min_lat=30.0, source_crop_max_lon=-90.0, source_crop_max_lat=45.0)
+        gw.validate_lonlat_crop_bounds(cfg)  # no raise
+
+    @pytest.mark.parametrize("field", ["source_crop_min_lon", "source_crop_min_lat", "source_crop_max_lon", "source_crop_max_lat"])
+    def test_partial_set_raises(self, field):
+        cfg = gw.Config(**{field: 1.0})
+        with pytest.raises(ValueError, match="must all be set together"):
+            gw.validate_lonlat_crop_bounds(cfg)
+
+    def test_min_lon_not_less_than_max_lon_raises(self):
+        cfg = gw.Config(source_crop_min_lon=-90.0, source_crop_min_lat=30.0, source_crop_max_lon=-110.0, source_crop_max_lat=45.0)
+        with pytest.raises(ValueError, match="min_lon"):
+            gw.validate_lonlat_crop_bounds(cfg)
+
+    def test_min_lat_not_less_than_max_lat_raises(self):
+        cfg = gw.Config(source_crop_min_lon=-110.0, source_crop_min_lat=45.0, source_crop_max_lon=-90.0, source_crop_max_lat=30.0)
+        with pytest.raises(ValueError, match="min_lat"):
+            gw.validate_lonlat_crop_bounds(cfg)
+
+    def test_combo_partial_set_raises(self):
+        cfg = gw.Config(combos=(gw.Combo(name="a", crop_min_lon=-100.0),))
+        with pytest.raises(ValueError, match=r"combos\['a'\].*must all be set together"):
+            gw.validate_lonlat_crop_bounds(cfg)
+
+    def test_combo_fully_set_and_valid_passes(self):
+        cfg = gw.Config(combos=(gw.Combo(name="a", crop_min_lon=-100.0, crop_min_lat=30.0, crop_max_lon=-90.0, crop_max_lat=40.0),))
+        gw.validate_lonlat_crop_bounds(cfg)  # no raise
+
+
+class TestValidateOutputProjection:
+    def test_default_is_valid(self):
+        gw.validate_output_projection(gw.Config())  # no raise
+
+    def test_orthographic_needs_no_bounds(self):
+        gw.validate_output_projection(gw.Config(output_projection="orthographic"))  # no raise
+
+    def test_bogus_projection_raises(self):
+        with pytest.raises(ValueError, match="output_projection must be one of"):
+            gw.validate_output_projection(gw.Config(output_projection="bogus"))
+
+    def test_platecarree_without_bounds_raises(self):
+        with pytest.raises(ValueError, match="requires a complete lon/lat crop box"):
+            gw.validate_output_projection(gw.Config(output_projection="platecarree"))
+
+    def test_platecarree_with_top_level_bounds_passes(self):
+        cfg = gw.Config(
+            output_projection="platecarree",
+            source_crop_min_lon=-110.0, source_crop_min_lat=30.0, source_crop_max_lon=-90.0, source_crop_max_lat=45.0,
+        )
+        gw.validate_output_projection(cfg)  # no raise
+
+    def test_platecarree_combo_without_bounds_and_no_top_level_fallback_raises(self):
+        cfg = gw.Config(output_projection="platecarree", combos=(gw.Combo(name="a"),))
+        with pytest.raises(ValueError, match=r"combos\['a'\]"):
+            gw.validate_output_projection(cfg)
+
+    def test_platecarree_combo_falls_back_to_top_level_bounds(self):
+        cfg = gw.Config(
+            output_projection="platecarree",
+            source_crop_min_lon=-110.0, source_crop_min_lat=30.0, source_crop_max_lon=-90.0, source_crop_max_lat=45.0,
+            combos=(gw.Combo(name="a"),),
+        )
+        gw.validate_output_projection(cfg)  # no raise
+
+    def test_lambertazimuthal_needs_no_bounds(self):
+        gw.validate_output_projection(gw.Config(output_projection="lambertazimuthal"))  # no raise
+
+    def test_lambertconformal_without_bounds_raises(self):
+        with pytest.raises(ValueError, match="requires a complete lon/lat crop box"):
+            gw.validate_output_projection(gw.Config(output_projection="lambertconformal"))
+
+    def test_lambertconformal_with_top_level_bounds_passes(self):
+        cfg = gw.Config(
+            output_projection="lambertconformal",
+            source_crop_min_lon=-125.0, source_crop_min_lat=25.0, source_crop_max_lon=-95.0, source_crop_max_lat=50.0,
+        )
+        gw.validate_output_projection(cfg)  # no raise
+
+    def test_lambertconformal_default_standard_parallels_pass(self):
+        cfg = gw.Config(
+            output_projection="lambertconformal",
+            source_crop_min_lon=-125.0, source_crop_min_lat=25.0, source_crop_max_lon=-95.0, source_crop_max_lat=50.0,
+        )
+        gw.validate_output_projection(cfg)  # no raise -- lcc_lat1/lcc_lat2 both unset is fine
+
+    def test_lambertconformal_explicit_standard_parallels_pass(self):
+        cfg = gw.Config(
+            output_projection="lambertconformal",
+            source_crop_min_lon=-125.0, source_crop_min_lat=25.0, source_crop_max_lon=-95.0, source_crop_max_lat=50.0,
+            output_projection_lcc_lat1=30.0, output_projection_lcc_lat2=45.0,
+        )
+        gw.validate_output_projection(cfg)  # no raise
+
+    def test_lambertconformal_partial_standard_parallels_raises(self):
+        cfg = gw.Config(
+            output_projection="lambertconformal",
+            source_crop_min_lon=-125.0, source_crop_min_lat=25.0, source_crop_max_lon=-95.0, source_crop_max_lat=50.0,
+            output_projection_lcc_lat1=30.0,
+        )
+        with pytest.raises(ValueError, match="must both be set together"):
+            gw.validate_output_projection(cfg)
+
+    def test_lambertconformal_lat1_not_less_than_lat2_raises(self):
+        cfg = gw.Config(
+            output_projection="lambertconformal",
+            source_crop_min_lon=-125.0, source_crop_min_lat=25.0, source_crop_max_lon=-95.0, source_crop_max_lat=50.0,
+            output_projection_lcc_lat1=45.0, output_projection_lcc_lat2=30.0,
+        )
+        with pytest.raises(ValueError, match="must be less than"):
+            gw.validate_output_projection(cfg)
+
+    def test_platecarree_combo_own_bounds_pass_without_top_level(self):
+        cfg = gw.Config(
+            output_projection="platecarree",
+            combos=(gw.Combo(name="a", crop_min_lon=-100.0, crop_min_lat=30.0, crop_max_lon=-90.0, crop_max_lat=40.0),),
+        )
+        gw.validate_output_projection(cfg)  # no raise

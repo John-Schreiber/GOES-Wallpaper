@@ -23,6 +23,36 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - Point/MultiPoint features from either provider above can carry a `properties.name`
   to draw a text label next to the marker, matching how `overlay_cities` labels a
   city.
+- Georeferenced overlays (`overlay_graticule`, `overlay_cities`, `overlay_geojson_files`,
+  `overlay_shell_command`) now work on the `cdn_jpg` path's Full Disk sector (`sector =
+  "FD"`), not just CONUS. Full Disk's GEOS extent is fixed (unlike Mesoscale, which
+  moves) and identical for every GOES-R series satellite regardless of orbital slot, so
+  it's reused directly from satpy's own shipped area definitions
+  (`goes_west`/`east_abi_f_2km`) rather than re-derived. `overlay_geojson_files`'s cache
+  key/filename now also includes `sector`, so CONUS and Full Disk renders of the same
+  satellite/style no longer collide in the cache.
+- `source_crop_min_lon`/`min_lat`/`max_lon`/`max_lat` — an alternative to
+  `source_crop_left`/`top`/`right`/`bottom` that frames the region of interest by a
+  lon/lat bounding box instead of a pixel fraction, converted via the same
+  georeferencing calibration `overlay_*` uses (`lonlat_box_to_crop_fraction`). Also
+  available per `[[combos]]` entry (`crop_min_lon`/etc., falling back to the
+  top-level value like `satellite`/`sector` rather than always applying like
+  `crop_left`/etc.).
+- `output_projection` — reproject the rendered frame into `"platecarree"`
+  (equirectangular) or `"lambertconformal"` (conformal conic, the standard choice for
+  a mid-latitude regional map — negligible distortion for a CONUS-sized box, unlike
+  platecarree/mercator; standard parallels default to 1/6 and 5/6 up the box's
+  latitude range, overridable via `output_projection_lcc_lat1`/`_lat2`), both framed
+  by `source_crop_min_lon`/etc., or `"orthographic"` (a globe view as seen from
+  space) or `"lambertazimuthal"` (equal-area azimuthal, shows nearly the whole globe
+  rather than just the visible hemisphere), both centered on
+  `output_projection_center_lon`/`_center_lat` (defaulting to the source's own
+  satellite sub-point) — instead of the satellite's native GEOS view. Pure
+  nearest-neighbor resampling via `pyproj`/`numpy` (`reproject_frame`) — no new
+  dependency — so this works for both the default `cdn_jpg` source (CONUS/Full Disk)
+  and `satpy_raw` (any sector, via its real per-frame georeferencing). See
+  [PROJECTIONS.md](PROJECTIONS.md) for example renders of each. Pixels outside
+  the visible hemisphere in `"orthographic"` render black.
 
 ## [2.0.0] — 2026-07-16 — full modernization
 

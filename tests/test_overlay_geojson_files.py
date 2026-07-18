@@ -176,6 +176,22 @@ class TestRenderStaticGeojsonOverlay:
         assert len(calls) == 2  # one build per distinct satellite, not per render call
         assert len(list(data_dir.glob("overlay_geojson_cache_*.png"))) == 2
 
+    def test_distinct_sectors_each_get_their_own_cache_entry(self, tmp_path):
+        # Same bug class as test_distinct_satellites_each_get_their_own_cache_entry,
+        # but for sector: CONUS and Full Disk use different GEOS extents for the same
+        # satellite, so they must never share a cache entry either.
+        geojson_path = tmp_path / "cities.geojson"
+        _write_geojson(geojson_path, SF_POINT)
+        data_dir = tmp_path / "data"
+        cfg = gw.Config(data_dir=data_dir, overlay_geojson_files=(str(geojson_path),))
+        conus = gw.resolve_source(gw.Config(satellite="GOES18", sector="CONUS"), None)
+        full_disk = gw.resolve_source(gw.Config(satellite="GOES18", sector="FD"), None)
+
+        gw.render_static_geojson_overlay(_blank(), cfg, conus)
+        gw.render_static_geojson_overlay(_blank(), cfg, full_disk)
+
+        assert len(list(data_dir.glob("overlay_geojson_cache_*.png"))) == 2
+
     def test_named_point_renders_label_through_the_cache_path(self, tmp_path):
         geojson_path = tmp_path / "cities.geojson"
         _write_geojson(geojson_path, {**SF_POINT, "properties": {"name": "San Francisco"}})
@@ -213,4 +229,20 @@ class TestDrawOverlaysWiring:
         bad_path.write_text("not json")
         cfg = gw.Config(data_dir=tmp_path / "data", overlay_geojson_files=(str(bad_path),))
         out = gw.draw_overlays(_blank(), cfg, _source())  # must not raise
+        assert _nonblack_pixel_count(out) == 0
+
+    def test_full_disk_sector_is_calibrated_not_skipped(self, tmp_path):
+        geojson_path = tmp_path / "cities.geojson"
+        _write_geojson(geojson_path, SF_POINT)
+        cfg = gw.Config(data_dir=tmp_path / "data", overlay_geojson_files=(str(geojson_path),))
+        full_disk = gw.resolve_source(gw.Config(satellite="GOES18", sector="FD"), None)
+        out = gw.draw_overlays(_blank(), cfg, full_disk)
+        assert _nonblack_pixel_count(out) > 0
+
+    def test_mesoscale_sector_is_skipped_not_crashed(self, tmp_path, caplog):
+        geojson_path = tmp_path / "cities.geojson"
+        _write_geojson(geojson_path, SF_POINT)
+        cfg = gw.Config(data_dir=tmp_path / "data", overlay_geojson_files=(str(geojson_path),))
+        mesoscale = gw.resolve_source(gw.Config(satellite="GOES18", sector="M1"), None)
+        out = gw.draw_overlays(_blank(), cfg, mesoscale)  # must not raise
         assert _nonblack_pixel_count(out) == 0

@@ -12,6 +12,7 @@ time.
 [Requirements](#requirements) · [Setup](#setup) · [Configuration](#configuration) ·
 [Multi-source combos](#multi-source-combos) ·
 [Georeferenced overlays](#georeferenced-overlays) ·
+[Output projection](#output-projection) ·
 [Custom raw-data source (satpy_raw)](#custom-raw-data-source-satpy_raw) ·
 [Power/network-aware fallbacks](#powernetwork-aware-fallbacks) ·
 [Cross-platform](#cross-platform) · [Freshness sync](#freshness-sync) ·
@@ -102,6 +103,9 @@ inline comment; the highlights:
   source frame, default the full frame) crop *before* that resize, to deliberately
   frame a region of interest — or to cut off NOAA's logo watermark, which sits in the
   bottom-left corner of every frame this CDN serves. See "Source image caveats" below.
+  `source_crop_min_lon/min_lat/max_lon/max_lat` frame the same region-of-interest crop
+  by a lon/lat bounding box instead, for whichever satellite/sector actually gets
+  fetched — see "Georeferenced overlays" below for the calibration this relies on.
 * **Freshness sync** — learns *when within each interval* NOAA actually publishes a
   new frame and schedules around that, instead of guessing at the raw clock boundary.
   See "Freshness sync" below.
@@ -119,8 +123,12 @@ inline comment; the highlights:
 * **Georeferenced overlays** — `overlay_graticule` (lat/lon grid), `overlay_cities`
   (labeled markers), `overlay_geojson_files` (a cached, static list of GeoJSON files),
   and `overlay_shell_command` (an external command whose stdout is parsed as GeoJSON
-  and rendered) drawn accurately onto the image, CONUS only. See "Georeferenced
-  overlays" below.
+  and rendered) drawn accurately onto the image, for CONUS and Full Disk sectors. See
+  "Georeferenced overlays" below.
+* **`output_projection`** — reproject the rendered frame into `platecarree`/
+  `lambertconformal` (framed by `source_crop_min_lon`/etc.) or `orthographic`/
+  `lambertazimuthal` (a globe view) instead of the satellite's native GEOS view. See
+  "Output projection" below and [PROJECTIONS.md](PROJECTIONS.md) for example renders.
 
 ## Multi-source combos
 
@@ -142,7 +150,10 @@ Beyond the single top-level source, `config.toml` can define named combos and a
 
 Any combo field left unset falls back to the top-level `satellite`/`sector`/`product`/
 `resolution`; the crop fields (`crop_left/top/right/bottom`) always apply and default
-to no crop. See the commented examples in [config.toml](config.toml).
+to no crop. `crop_min_lon/min_lat/max_lon/max_lat` (the lon/lat crop-box alternative —
+see "Georeferenced overlays" below) behave like the source-selection fields instead:
+unset on a combo falls back to the top-level `source_crop_min_lon`/etc. rather than
+always applying. See the commented examples in [config.toml](config.toml).
 
 Note on monitor numbering: the `monitor` index refers to the enumeration order the
 platform backend reports (Windows: `IDesktopWallpaper`'s order), which isn't
@@ -154,16 +165,18 @@ land on the wrong screen, swap the indices.
 `overlay_graticule` (a lat/lon grid) and `overlay_cities` (labeled markers at exact
 coordinates) can be drawn accurately onto the image — accurately meaning genuinely
 georeferenced, not just eyeballed: `lonlat_to_pixels()` projects real lon/lat into the
-image's actual GEOS satellite projection using `pyproj`, with the projection extent
-for each satellite's CONUS sector derived from a real ABI L1b radiance file (loaded
-with `satpy` during development, not a runtime dependency) and validated against 10
-known city landmarks — median error well under a pixel at 2500×1500.
+image's actual GEOS satellite projection using `pyproj`. The CONUS extent for each
+satellite was derived from a real ABI L1b radiance file (loaded with `satpy` during
+development, not a runtime dependency) and validated against 10 known city landmarks —
+median error well under a pixel at 2500×1500. The Full Disk extent is reused directly
+from `satpy`'s own shipped area definitions (`goes_west`/`east_abi_f_2km`), since
+Full Disk's fixed viewing geometry is identical for every GOES-R series satellite
+regardless of orbital slot — and cross-checked in `tests/test_geolocation.py` against
+an independent `pyresample` computation over the same area.
 
-**CONUS only.** The calibration constants are specific to each satellite's CONUS
-sector extent; Full Disk wasn't calibrated, and Mesoscale sectors move (NOAA
-repositions them), so their extent can't be hardcoded the same way. Enabling an
-overlay on a non-CONUS sector logs a warning and skips drawing rather than rendering
-something misplaced.
+**CONUS and Full Disk only.** Mesoscale sectors move (NOAA repositions them), so their
+extent can't be hardcoded the same way. Enabling an overlay on a Mesoscale sector logs
+a warning and skips drawing rather than rendering something misplaced.
 
 This adds content on top — it doesn't and can't remove NOAA's own baked-in state
 lines/logo (see "Source image caveats" below for why) *for the default `cdn_jpg`
@@ -172,6 +185,44 @@ source_kind*. See the next section for a source that does remove them.
 Marker/line sizes are tuned for a ~2000px-wide frame and scale up automatically at
 higher `resolution` settings. With `source_kind = "satpy_raw"`, overlays work on any
 sector, not just CONUS — see below.
+
+## Output projection
+
+`output_projection` reprojects the rendered frame into a different map projection
+instead of the satellite's native GEOS view. `"native"` (default) means no
+reprojection; otherwise:
+
+* **Bounds-framed** (`source_crop_min_lon/min_lat/max_lon/max_lat` above, required in
+  these modes — those bounds become the reprojected output's extent):
+  * `"platecarree"` — equirectangular.
+  * `"lambertconformal"` — conformal conic, the standard choice for a mid-latitude
+    regional map (what NWS/NOAA's own CONUS maps use) — negligible distortion for a
+    CONUS-sized box, unlike `platecarree`/Mercator. Standard parallels default to 1/6
+    and 5/6 up the box's latitude range; override with
+    `output_projection_lcc_lat1`/`_lcc_lat2` for specific ones.
+* **Center-framed** (`output_projection_center_lon`/`output_projection_center_lat`,
+  defaulting to the resolved source's own satellite sub-point and the equator):
+  * `"orthographic"` — a globe view as seen from space; pixels outside the visible
+    hemisphere render black — that's "space," not a bug.
+  * `"lambertazimuthal"` — equal-area azimuthal; shows nearly the whole globe, not
+    just the visible hemisphere, without Mercator's polar blowup, at the cost of
+    shape distortion far from center.
+
+See [PROJECTIONS.md](PROJECTIONS.md) for example renders of each.
+
+Implemented with nearest-neighbor resampling via `pyproj`/`numpy` only — no
+`pyresample`/`satpy` dependency — so it works for both the default `cdn_jpg` source
+(CONUS/Full Disk, using the same hand-calibrated extents `overlay_*` uses) and
+`source_kind = "satpy_raw"` (any sector, using its real per-frame georeferencing).
+Reprojection replaces rather than stacks with the region-of-interest crop — its own
+bounds/framing already define what survives. Falls back to the native projection,
+logged, if there's no calibration for the resolved satellite/sector. Not
+combo-overridable — every combo shares one `output_projection` if set.
+
+Caveat: `cdn_jpg`'s baked-in NOAA captions/state borders warp along with everything
+else near the projection's edges, since they can't be distinguished from the rest of
+the image (see "Source image caveats" below) — this is most noticeable in
+`"orthographic"`/`"lambertazimuthal"` near the limb of the globe.
 
 ## Custom raw-data source (satpy_raw)
 

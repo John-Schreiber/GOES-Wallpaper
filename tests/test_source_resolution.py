@@ -97,3 +97,31 @@ def test_effective_source_key_still_includes_product_resolution_for_cdn_jpg():
     cfg = gw.Config(satellite="GOES18", sector="CONUS", product="GEOCOLOR", resolution="5000x3000")
     source = gw.resolve_source(cfg, None)
     assert source.key == "GOES18/CONUS/GEOCOLOR/5000x3000"
+
+
+def test_resolve_source_default_lonlat_crop_is_unset():
+    source = gw.resolve_source(gw.Config(), None)
+    assert source.crop_min_lon is None
+    assert source.crop_min_lat is None
+    assert source.crop_max_lon is None
+    assert source.crop_max_lat is None
+
+
+def test_resolve_source_top_level_lonlat_crop_applies_with_no_combo():
+    cfg = gw.Config(source_crop_min_lon=-110.0, source_crop_min_lat=30.0, source_crop_max_lon=-90.0, source_crop_max_lat=45.0)
+    source = gw.resolve_source(cfg, None)
+    assert (source.crop_min_lon, source.crop_min_lat, source.crop_max_lon, source.crop_max_lat) == (-110.0, 30.0, -90.0, 45.0)
+
+
+def test_resolve_source_combo_lonlat_crop_overrides_config():
+    cfg = gw.Config(source_crop_min_lon=-110.0, source_crop_min_lat=30.0, source_crop_max_lon=-90.0, source_crop_max_lat=45.0)
+    combo = gw.Combo(name="c", crop_min_lon=-80.0, crop_min_lat=20.0, crop_max_lon=-70.0, crop_max_lat=30.0)
+    source = gw.resolve_source(cfg, combo)
+    assert (source.crop_min_lon, source.crop_min_lat, source.crop_max_lon, source.crop_max_lat) == (-80.0, 20.0, -70.0, 30.0)
+
+
+def test_resolve_source_combo_falls_back_to_config_lonlat_crop_when_unset():
+    cfg = gw.Config(source_crop_min_lon=-110.0, source_crop_min_lat=30.0, source_crop_max_lon=-90.0, source_crop_max_lat=45.0)
+    combo = gw.Combo(name="c")  # lon/lat crop fields unset
+    source = gw.resolve_source(cfg, combo)
+    assert (source.crop_min_lon, source.crop_min_lat, source.crop_max_lon, source.crop_max_lat) == (-110.0, 30.0, -90.0, 45.0)
