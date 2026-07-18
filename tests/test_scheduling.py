@@ -144,3 +144,48 @@ class TestMaybeWaitForSync:
         monkeypatch.setattr(gw.time, "sleep", lambda s: slept.append(s))
         gw.maybe_wait_for_sync(cfg, state, source)
         assert slept == []
+
+
+class TestNextCycleSourceKey:
+    """run_loop schedules its next wake-up off the phase of whichever source
+    _next_cycle_source_key names -- these pin down that in "rotate" mode this must
+    be the *upcoming* combo (state["combo_rotation_index"], already advanced by
+    run_once_rotate before it saves state), not state["last_source_key"] (the combo
+    *just* fetched, whose publish phase can differ)."""
+
+    def _combos(self):
+        return (
+            gw.Combo(name="a", satellite="GOES18", sector="CONUS"),
+            gw.Combo(name="b", satellite="GOES19", sector="FD"),
+        )
+
+    def test_rotate_mode_uses_the_upcoming_combo_not_the_last_fetched_one(self):
+        combos = self._combos()
+        cfg = gw.Config(combo_mode="rotate", combos=combos)
+        # combo_rotation_index=1 means run_once_rotate just fetched combos[0] and
+        # advanced the index to point at combos[1] for next cycle.
+        state = {
+            "combo_rotation_index": 1,
+            "last_source_key": gw.resolve_source(cfg, combos[0]).key,
+        }
+        key = gw._next_cycle_source_key(cfg, state)
+        assert key == gw.resolve_source(cfg, combos[1]).key
+        assert key != state["last_source_key"]
+
+    def test_rotate_mode_wraps_the_index(self):
+        combos = self._combos()
+        cfg = gw.Config(combo_mode="rotate", combos=combos)
+        state = {"combo_rotation_index": 0}  # wrapped back to the first combo
+        assert gw._next_cycle_source_key(cfg, state) == gw.resolve_source(cfg, combos[0]).key
+
+    def test_single_mode_uses_last_source_key(self):
+        cfg = gw.Config(combo_mode="single")
+        state = {"last_source_key": "some/source/key"}
+        assert gw._next_cycle_source_key(cfg, state) == "some/source/key"
+
+    def test_per_monitor_mode_has_no_single_key(self):
+        # run_once_per_monitor never writes last_source_key (several sources are
+        # fetched per cycle, no single one to name) -- falls back to clock-boundary
+        # alignment via the None here, same as an empty/fresh state.
+        cfg = gw.Config(combo_mode="per_monitor", combos=self._combos())
+        assert gw._next_cycle_source_key(cfg, {}) is None

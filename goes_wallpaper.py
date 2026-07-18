@@ -2198,12 +2198,29 @@ _CYCLE_FUNCS = {
 }
 
 
+def _next_cycle_source_key(cfg: Config, state: dict[str, Any]) -> str | None:
+    """The source key whose learned capture phase should drive run_loop's next
+    wake-up: the source that will actually be fetched *next* cycle, not just
+    whichever one state["last_source_key"] recorded. In "rotate" mode those
+    differ — last_source_key is the combo just fetched, but combo_rotation_index
+    (already advanced by run_once_rotate before it saved state) points at the
+    *upcoming* combo, whose publish phase (different satellite/sector/product)
+    may not match. "single" mode has no such gap (same source every cycle, so
+    last_source_key already names it); "per_monitor" mode fetches several
+    sources per cycle, so there's no single phase to target — falls back to
+    plain clock-boundary alignment via the None here."""
+    if cfg.combo_mode == "rotate" and cfg.combos:
+        index = state.get("combo_rotation_index", 0) % len(cfg.combos)
+        return resolve_source(cfg, cfg.combos[index]).key
+    return state.get("last_source_key")
+
+
 def run_loop(cfg: Config, overlays: OverlaysConfig, session: requests.Session, platform: WallpaperPlatform) -> None:
     """Run indefinitely, waking on drift-corrected boundaries instead of naive sleep(),
     so the effective cadence doesn't creep as each cycle's own runtime accumulates.
     When sync_to_capture_time is enabled, the boundary itself is nudged to line up
     with when fresh frames actually post rather than the raw clock tick — driven by
-    whichever source state["last_source_key"] points at (unset in "per_monitor" mode,
+    whichever source _next_cycle_source_key points at (unset in "per_monitor" mode,
     since multiple sources are fetched per cycle there; falls back to plain
     clock-boundary alignment in that case)."""
     cycle = _CYCLE_FUNCS[cfg.combo_mode]
@@ -2215,7 +2232,7 @@ def run_loop(cfg: Config, overlays: OverlaysConfig, session: requests.Session, p
 
         state = load_state(cfg)
         now = time.time()
-        key = state.get("last_source_key")
+        key = _next_cycle_source_key(cfg, state)
         sstate = state.get("sources", {}).get(key, {}) if key else {}
         next_run = compute_next_run(cfg, sstate, now)
         next_run += cfg.jitter_seconds * (0.5 - _rand_unit())

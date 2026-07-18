@@ -43,21 +43,21 @@ Found by code review of `goes_wallpaper.py`/`source_satpy.py`/`platform_windows.
    part of the current scan's selection before downloading it, so peak usage stays
    at roughly one cycle's worth instead of growing forever. Regression-tested in
    `tests/test_source_satpy.py`.
-2. **`avoid_taskbar` breaks for a side- or top-docked taskbar.**
-   `WindowsPlatform.get_taskbar_height()` returns the `Shell_TrayWnd` window rect's
-   *height* unconditionally. A left/right-docked taskbar's rect is the full screen
-   height, so the info bar gets nudged up by ~the whole screen and composites at a
-   negative y offset — verified Pillow 12 doesn't raise on that, it just renders the
-   bar off-image, so those users silently get **no info bar** (with `avoid_taskbar`
-   on by default). A top-docked taskbar nudges the bar up needlessly. Fix: use
-   `SHAppBarMessage(ABM_GETTASKBARPOS)` to get the taskbar *edge*, and only apply the
-   margin when it's docked at the bottom (return 0 otherwise).
-3. **`combo_mode = "rotate"` schedules the next wake-up from the wrong combo's
-   learned phase.** `run_loop` reads `state["last_source_key"]` — the combo *just
-   fetched* — but the next cycle fetches the *next* combo in the rotation, whose
-   publish phase (different satellite/sector/product) may differ. Fix: have rotate
-   mode record the upcoming combo's key (it already persists
-   `combo_rotation_index`), or compute the phase from that index in `run_loop`.
+2. ~~**`avoid_taskbar` breaks for a side- or top-docked taskbar.**~~ Done:
+   `WindowsPlatform.get_taskbar_height()` now uses
+   `SHAppBarMessage(ABM_GETTASKBARPOS)` to read the taskbar's actual docked edge and
+   only applies a margin when it's at the bottom (0 otherwise), instead of reading
+   `Shell_TrayWnd`'s window rect height unconditionally (which for a side-docked
+   taskbar is the full screen height). Verified against this machine's real
+   (bottom-docked) taskbar and unit-tested for all four edges in
+   `tests/test_platform_windows.py` (mocked, like the rest of the platform backends'
+   edge-case coverage).
+3. ~~**`combo_mode = "rotate"` schedules the next wake-up from the wrong combo's
+   learned phase.**~~ Done: `run_loop` now computes the phase from
+   `state["combo_rotation_index"]` (the *upcoming* combo, already advanced by
+   `run_once_rotate` before it saves state) via a new `_next_cycle_source_key`
+   helper, instead of `state["last_source_key"]` (the combo *just* fetched).
+   Regression-tested in `tests/test_scheduling.py`.
 4. ~~**`state.json`/`wallpaper.json` writes aren't atomic.**~~ Done: both, plus the
    GeoJSON overlay cache sidecar, now go through a shared `_atomic_write_text`
    (write to a same-directory temp file, then `os.replace`).

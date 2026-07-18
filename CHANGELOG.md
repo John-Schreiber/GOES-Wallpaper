@@ -24,6 +24,21 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `"windows"`/`"kde"`, it's never chosen by `"auto"` detection; opt in explicitly via
   config.toml. See README's "Render-only backend" section.
 
+### Fixed
+- `avoid_taskbar` did nothing useful for a left/right-docked taskbar —
+  `WindowsPlatform.get_taskbar_height()` read `Shell_TrayWnd`'s window rect height
+  unconditionally, which for a side-docked taskbar is the full screen height, so the
+  info bar was nudged up by roughly a screen's worth of pixels and composited
+  off-image (silently no info bar at all, since `avoid_taskbar` defaults on). Now
+  uses `SHAppBarMessage(ABM_GETTASKBARPOS)` to read the taskbar's actual docked edge
+  and only applies a margin when it's at the bottom.
+- `combo_mode = "rotate"` could schedule `--loop`'s next wake-up from the wrong
+  combo's learned capture phase — `run_loop` used `state["last_source_key"]`, the
+  combo just fetched, but the *next* cycle fetches the next combo in rotation, whose
+  publish phase (different satellite/sector/product) can differ. `run_loop` now
+  computes the phase from the upcoming combo (`state["combo_rotation_index"]`,
+  already advanced before state is saved) instead.
+
 ### Changed — BREAKING: overlays moved out of config.toml
 
 Georeferenced overlays (graticule, city markers, GeoJSON files, a live shell-command
