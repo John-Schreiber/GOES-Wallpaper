@@ -51,7 +51,7 @@ from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import numpy as np
 import requests
@@ -433,6 +433,10 @@ class Config:
     def log_path(self) -> Path:
         return self.data_dir / "log.txt"
 
+    @property
+    def lock_path(self) -> Path:
+        return self.data_dir / "goes_wallpaper.lock"
+
 
 def load_config(config_path: Path, overrides: dict[str, Any], platform: WallpaperPlatform | None = None) -> Config:
     """Build a Config from an optional TOML file, then apply CLI overrides on top.
@@ -798,6 +802,58 @@ def setup_logging(cfg: Config) -> None:
         "goes_wallpaper %s (%s) starting, pid %d",
         _package_version(), commit or "no git checkout detected", os.getpid(),
     )
+
+
+def acquire_instance_lock(cfg: Config) -> BinaryIO | None:
+    """Prevent two goes_wallpaper processes from running against the same data_dir at
+    once. Nothing coordinates concurrent writes to state.json/wallpaper.jpg/log.txt --
+    two racing instances (e.g. a second --loop started without noticing the first was
+    still running) each learn their own capture phase and apply whichever cycle
+    happens to finish last, which can silently leave a *staler* frame applied than
+    either instance would ever produce alone, with nothing in the log to explain why.
+
+    Returns an open file handle the caller must keep referenced for the process's
+    entire lifetime -- the lock is an OS-level advisory lock tied to that handle
+    (fcntl.flock on POSIX, msvcrt.locking on Windows), released automatically, even
+    on a crash or kill, whenever the handle closes. That means there's no stale
+    lock-file/PID bookkeeping to get wrong: an old lock left by a process that's
+    genuinely gone is released the moment that process's handle table goes away, not
+    based on guessing from a PID or timestamp.
+
+    Returns None (after logging why) if another live process already holds it --
+    callers should treat that as fatal and exit rather than proceed unlocked."""
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    handle = cfg.lock_path.open("a+b")
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        # A byte-range lock needs a byte to range over; a brand-new file has none.
+        handle.write(b"\0")
+        handle.flush()
+
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        logging.error(
+            "Another goes_wallpaper process already has %s locked -- exiting instead "
+            "of racing it for state.json/wallpaper.jpg/log.txt in %s.",
+            cfg.lock_path, cfg.data_dir,
+        )
+        return None
+
+    # Byte 0 stays reserved for the lock itself (never rewritten); diagnostics from
+    # byte 1 on are just for a human inspecting the file, not read back by any code.
+    handle.seek(1)
+    handle.truncate()
+    handle.write(f"pid={os.getpid()}".encode("ascii"))
+    handle.flush()
+    return handle
 
 
 # --------------------------------------------------------------------------- #
@@ -2358,22 +2414,28 @@ def main(argv: list[str] | None = None) -> int:
     validate_platform(cfg)
     setup_logging(cfg)
 
-    overlays = load_overlays_config(args.overlays_config)
-    validate_overlays_config(overlays)
-
-    session = build_session(cfg)
-    try:
-        if cfg.loop:
-            run_loop(cfg, overlays, session, platform)
-        else:
-            _CYCLE_FUNCS[cfg.combo_mode](cfg, overlays, session, platform)
-    except KeyboardInterrupt:
-        logging.info("Interrupted, exiting")
-        return 130
-    except Exception:
-        logging.exception("Unhandled exception while running goes_wallpaper")
+    lock_handle = acquire_instance_lock(cfg)
+    if lock_handle is None:
         return 1
-    return 0
+    try:
+        overlays = load_overlays_config(args.overlays_config)
+        validate_overlays_config(overlays)
+
+        session = build_session(cfg)
+        try:
+            if cfg.loop:
+                run_loop(cfg, overlays, session, platform)
+            else:
+                _CYCLE_FUNCS[cfg.combo_mode](cfg, overlays, session, platform)
+        except KeyboardInterrupt:
+            logging.info("Interrupted, exiting")
+            return 130
+        except Exception:
+            logging.exception("Unhandled exception while running goes_wallpaper")
+            return 1
+        return 0
+    finally:
+        lock_handle.close()
 
 
 if __name__ == "__main__":

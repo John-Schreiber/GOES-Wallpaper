@@ -5,6 +5,17 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Single-instance locking.** A second goes_wallpaper process (e.g. a duplicate
+  `--loop` started without noticing the first was still running) now exits
+  immediately with an error instead of racing the first for the same `data_dir`'s
+  `state.json`/`wallpaper.jpg`/`log.txt`. Previously nothing coordinated concurrent
+  instances, so whichever cycle finished last silently won regardless of which one
+  actually fetched the fresher capture — able to leave the applied wallpaper *staler*
+  than either instance would ever produce alone, with nothing in the log to explain
+  why. The lock (`goes_wallpaper.lock` in `data_dir`) is an OS-level advisory lock
+  held for the process's lifetime (`fcntl.flock`/`msvcrt.locking`), so it's released
+  automatically even on a crash or kill — no stale-lock-file cleanup required. See
+  `acquire_instance_lock`.
 - Startup now logs the running version and git commit (e.g. `goes_wallpaper 2.2.0
   (375cc69) starting, pid 12345`), so a long-running `--loop` process (or a stray
   leftover one from an old checkout/branch) can be identified from `log.txt` alone.
