@@ -102,10 +102,6 @@ addressing or keeping in mind:
 A few non-obvious things learned while building and testing this, not really
 "gaps" but easy to waste time rediscovering:
 
-- **GOES-19 (the default `satellite`) has been offline for extended periods** during
-  development — its CDN endpoint serves an unchanging frame (304s on every poll) and
-  its S3 raw-data bucket goes hours without a new file. GOES-18 has been reliably
-  live throughout; use `--satellite GOES18` for testing if GOES-19 looks stuck.
 - **`combo_mode = "per_monitor"` has been verified against real multi-monitor
   hardware**, not just code review — worth knowing since it's easy to test this only
   via reasoning about `GetSystemMetrics`/`IDesktopWallpaper` calls otherwise.
@@ -314,12 +310,17 @@ A few non-obvious things learned while building and testing this, not really
     it. Cache-key note: `_geojson_files_cache_key`/`_cache_id` would then need the
     area extent in the key (satellite alone no longer identifies the projection once
     Full Disk and CONUS frames both render).
-19. **Nothing prunes stale `overlay_geojson_cache_*.png` entries** in `data_dir`
-    (`OVERLAYS.md` documents this). Each distinct (name, files, satellite, frame
-    size, style) combination mints a new pair of files; old ones are left behind
-    forever after a config change. Full-frame RGBA PNGs at 5000x3000 aren't tiny — a cheap fix is
-    deleting cache files whose `.json` sidecar hasn't matched in N days, or capping
-    the count. Fold into whatever cache shape gap 16's per-combo work lands on.
+19. ~~**Nothing prunes stale `overlay_geojson_cache_*.png` entries** in
+    `data_dir`.~~ Done: `prune_stale_geojson_cache` (called once per cycle from
+    each `run_once*`) deletes an `overlay_geojson_cache_<id>.png`/`.json` pair
+    once it's gone unused for `overlay_cache_max_age_days` (30 by default; 0
+    disables it). "Unused" is tracked by mtime — `render_static_geojson_overlay`
+    now touches both files on every cache *hit*, not just on rebuild, so an
+    entry a running config still matches every cycle never goes stale no matter
+    how old its content is; only an orphaned identity (a removed/renamed source,
+    or one that changed satellite/resolution/style) ages out. Still not folded
+    into gap 16's per-combo cache-key work — the pruning is identity-agnostic,
+    so it'll cover whatever shape that work lands on without changes.
 20. ~~**Platform selection is hardcoded, not configurable.**~~ Done: `platform`
     config setting (`"auto"` default, or explicit `"windows"`/`"kde"`/`"render"`)
     short-circuits `get_platform()`'s `sys.platform`/`XDG_CURRENT_DESKTOP` sniffing.

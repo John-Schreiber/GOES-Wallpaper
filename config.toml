@@ -52,6 +52,9 @@ source_kind = "cdn_jpg"
 wallpaper_style = "fill"  # fill | fit | stretch | tile | center | span
 # render_to = "C:/Users/you/Desktop/test_render.jpg"  # save the rendered frame here
                            # and skip applying it as the wallpaper -- for testing
+# overlay_cache_max_age_days = 30  # delete overlay_geojson_cache_*.png/.json pairs
+                           # unused this many days (e.g. a removed/renamed
+                           # geojson_sources entry) -- 0 disables pruning
 
 # --- Screen handling ---
 crop_to_screen = true
