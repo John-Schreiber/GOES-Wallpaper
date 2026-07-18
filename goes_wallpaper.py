@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import io
 import json
 import logging
@@ -735,6 +736,47 @@ def resolve_source(cfg: Config, combo: Combo | None) -> EffectiveSource:
 # Logging
 # --------------------------------------------------------------------------- #
 
+def _package_version() -> str:
+    """The version string to log at startup. Reads pyproject.toml next to this script
+    when running from a source checkout (the common case -- see the module docstring:
+    `python goes_wallpaper.py` / `pythonw.exe goes_wallpaper.py`); falls back to
+    installed-package metadata for a packaged install where pyproject.toml isn't
+    shipped alongside the script. "unknown" if neither resolves, rather than raising
+    -- this is diagnostic sugar for logs, never something a cycle should fail over."""
+    pyproject_path = Path(__file__).with_name("pyproject.toml")
+    try:
+        with pyproject_path.open("rb") as f:
+            return tomllib.load(f)["project"]["version"]
+    except (OSError, tomllib.TOMLDecodeError, KeyError):
+        pass
+    try:
+        return importlib.metadata.version("goes-wallpaper")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _commit_hash() -> str | None:
+    """Short git commit hash of the checkout this script is running from, or None if
+    it's not a git checkout (a packaged install, a zip download, git not on PATH,
+    etc.) -- logged alongside _package_version() so a long-running --loop process
+    (or a stray leftover one from an old checkout/branch) can be identified from
+    log.txt alone, without needing to know which directory it was launched from."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
 def setup_logging(cfg: Config) -> None:
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
@@ -750,6 +792,12 @@ def setup_logging(cfg: Config) -> None:
     root.setLevel(cfg.log_level)
     root.handlers.clear()
     root.addHandler(handler)
+
+    commit = _commit_hash()
+    logging.info(
+        "goes_wallpaper %s (%s) starting, pid %d",
+        _package_version(), commit or "no git checkout detected", os.getpid(),
+    )
 
 
 # --------------------------------------------------------------------------- #

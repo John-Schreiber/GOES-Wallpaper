@@ -5,6 +5,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Startup now logs the running version and git commit (e.g. `goes_wallpaper 2.2.0
+  (375cc69) starting, pid 12345`), so a long-running `--loop` process (or a stray
+  leftover one from an old checkout/branch) can be identified from `log.txt` alone.
+  Commit resolution is best-effort (`git rev-parse --short HEAD` next to the script)
+  and logs `"no git checkout detected"` for a packaged install or zip download
+  instead of failing.
 - **Overlay GeoJSON cache pruning.** `overlay_geojson_cache_*.png`/`.json` pairs
   in `data_dir` orphaned by a removed/renamed `geojson_sources` entry, or one
   that changed satellite/resolution/style (minting a new cache identity), are
