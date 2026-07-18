@@ -190,6 +190,10 @@ class Config:
     crop_anchor: float = 0.5  # 0.0 = top/left, 0.5 = center, 1.0 = bottom/right
     screen_width: int | None = None  # override auto-detection
     screen_height: int | None = None
+    # For platform = "render" specifically, these two also size the synthetic
+    # monitor list_monitors() reports (combo_mode = "per_monitor"'s render size) --
+    # see get_platform()'s render_fallback_width/height parameters. Every other
+    # backend ignores that plumbing; it only reaches RenderOnlyPlatform.
     span_all_monitors: bool = False  # crop to the full virtual desktop instead of the
     # primary monitor; pair with wallpaper_style = "span" so Windows stretches the one
     # image across all displays instead of just mirroring it onto the primary.
@@ -2199,7 +2203,11 @@ def main(argv: list[str] | None = None) -> int:
     # read, safe to call twice.
     platform_probe_cfg = load_config(args.config, overrides)
     validate_platform(platform_probe_cfg)
-    platform = get_platform(platform_probe_cfg.platform)
+    platform = get_platform(
+        platform_probe_cfg.platform,
+        render_fallback_width=platform_probe_cfg.screen_width,
+        render_fallback_height=platform_probe_cfg.screen_height,
+    )
     cfg = load_config(args.config, overrides, platform=platform)
     validate_combos(cfg)
     validate_source_kind(cfg)

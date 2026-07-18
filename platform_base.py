@@ -134,13 +134,27 @@ class WallpaperPlatform(ABC):
         this path not existing (falls back to Pillow's built-in default font)."""
 
 
-def get_platform(override: str = "auto") -> WallpaperPlatform:
-    """Construct the backend for the current OS. `override` is deliberately the only
-    argument — per-call behavior (like whether to use fallback screen-size detection)
-    belongs on the relevant WallpaperPlatform method instead, not baked into
-    construction, so this factory doesn't accumulate one backend's config knobs.
-    `override` is an exception to that: it picks *which* backend, not how one
+def get_platform(
+    override: str = "auto",
+    *,
+    render_fallback_width: int | None = None,
+    render_fallback_height: int | None = None,
+) -> WallpaperPlatform:
+    """Construct the backend for the current OS. `override` is deliberately almost
+    the only argument — per-call behavior (like whether to use fallback screen-size
+    detection) belongs on the relevant WallpaperPlatform method instead, not baked
+    into construction, so this factory doesn't accumulate one backend's config
+    knobs. `override` is an exception to that: it picks *which* backend, not how one
     behaves, so it stays here rather than on any individual backend.
+
+    `render_fallback_width`/`render_fallback_height` are a second, narrower
+    exception, forwarded only to platform_render.RenderOnlyPlatform (ignored for
+    every other backend, which detects real hardware and has no use for a size
+    hint at construction time). They exist because RenderOnlyPlatform.list_monitors()
+    -- unlike get_screen_size() -- has no per-call size parameters at all (a fixed
+    WallpaperPlatform signature shared with the real backends), so a
+    combo_mode = "per_monitor" render size can only reach it via construction.
+    goes_wallpaper.main() passes Config.screen_width/screen_height here.
 
     "auto" (default) preserves today's sys.platform/XDG_CURRENT_DESKTOP sniffing
     below. An explicit "windows"/"kde" short-circuits that sniffing entirely --
@@ -162,7 +176,7 @@ def get_platform(override: str = "auto") -> WallpaperPlatform:
         return KDEPlatform()
     if override == "render":
         from platform_render import RenderOnlyPlatform
-        return RenderOnlyPlatform()
+        return RenderOnlyPlatform(render_fallback_width, render_fallback_height)
 
     if sys.platform == "win32":
         from platform_windows import WindowsPlatform

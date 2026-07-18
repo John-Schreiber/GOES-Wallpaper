@@ -472,12 +472,15 @@ no desktop shell at all — a server, a container, an SSH session, CI — where 
 just the rendered image(s) (typically via `render_to`), never a desktop wallpaper.
 `apply_wallpaper`/`apply_wallpaper_per_monitor` are no-ops (they log and return rather
 than error), `get_screen_size`/`list_monitors` fall back to a fixed 1920×1080 since
-there's no display to detect (set `screen_width`/`screen_height` for a different render
-size), and battery/network detection report "unknown" — there's no hardware to ask.
-Unlike `windows`/`kde`, `render` is **never** chosen by `"auto"` detection, even on an
-unrecognized OS or Linux desktop environment: an unsupported real desktop should still
-raise `NotImplementedError` (with a pointer to `platform = "render"` in the error
-message) rather than silently doing nothing. You have to opt in explicitly.
+there's no display to detect, and battery/network detection report "unknown" — there's
+no hardware to ask. Set `screen_width`/`screen_height` in config.toml for a different
+render size — unlike the other backends, this also sizes `list_monitors()`'s single
+synthetic monitor (so `combo_mode = "per_monitor"` renders at that size too), since
+there's no real per-call size hook for that method to use instead. Unlike `windows`/
+`kde`, `render` is **never** chosen by `"auto"` detection, even on an unrecognized OS or
+Linux desktop environment: an unsupported real desktop should still raise
+`NotImplementedError` (with a pointer to `platform = "render"` in the error message)
+rather than silently doing nothing. You have to opt in explicitly.
 
 ### Adding another OS/desktop environment
 

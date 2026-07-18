@@ -53,6 +53,23 @@ class TestGetPlatformOverride:
 
         assert isinstance(platform_base.get_platform("render"), RenderOnlyPlatform)
 
+    def test_render_override_forwards_fallback_size(self):
+        platform = platform_base.get_platform(
+            "render", render_fallback_width=3840, render_fallback_height=2160,
+        )
+        assert platform.get_screen_size(False, None, None) == (3840, 2160)
+
+    def test_render_fallback_size_ignored_by_other_backends(self, monkeypatch):
+        # render_fallback_width/height only mean anything to RenderOnlyPlatform --
+        # confirm passing them alongside "kde" doesn't raise (KDEPlatform() takes no
+        # constructor arguments at all).
+        from platform_linux_kde import KDEPlatform
+
+        platform = platform_base.get_platform(
+            "kde", render_fallback_width=3840, render_fallback_height=2160,
+        )
+        assert isinstance(platform, KDEPlatform)
+
 
 class TestGetPlatformAutoDetection:
     def test_auto_detects_kde_from_xdg_current_desktop(self, monkeypatch):

@@ -30,6 +30,18 @@ class TestGetScreenSize:
         platform = RenderOnlyPlatform()
         assert platform.get_screen_size(True, None, None) == _FALLBACK_SIZE
 
+    def test_call_time_override_wins_over_configured_fallback(self):
+        platform = RenderOnlyPlatform(fallback_width=3840, fallback_height=2160)
+        assert platform.get_screen_size(False, 800, 600) == (800, 600)
+
+    def test_falls_back_to_configured_size_without_call_time_overrides(self):
+        platform = RenderOnlyPlatform(fallback_width=3840, fallback_height=2160)
+        assert platform.get_screen_size(False, None, None) == (3840, 2160)
+
+    def test_configured_fallback_needs_both_dimensions(self):
+        platform = RenderOnlyPlatform(fallback_width=3840, fallback_height=None)
+        assert platform.get_screen_size(False, None, None) == _FALLBACK_SIZE
+
 
 class TestNoDesktopShell:
     def test_taskbar_height_is_always_zero(self):
@@ -54,6 +66,15 @@ class TestListMonitors:
         width, height = _FALLBACK_SIZE
         assert monitors[0].width == width
         assert monitors[0].height == height
+
+    def test_synthetic_monitor_honors_configured_fallback_size(self):
+        # list_monitors() has no per-call size parameters (unlike get_screen_size),
+        # so a configured fallback -- not a call-time override -- is the only way to
+        # size combo_mode = "per_monitor"'s render on this backend.
+        monitors = RenderOnlyPlatform(fallback_width=3840, fallback_height=2160).list_monitors()
+        assert len(monitors) == 1
+        assert monitors[0].width == 3840
+        assert monitors[0].height == 2160
 
 
 class TestPowerNetwork:

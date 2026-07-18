@@ -51,6 +51,23 @@ _SYNTHETIC_MONITOR_ID = "0"
 
 
 class RenderOnlyPlatform(WallpaperPlatform):
+    """`fallback_width`/`fallback_height` (both required together, like
+    get_screen_size's own width_override/height_override) size the synthetic
+    "display" this backend renders against when nothing else says otherwise --
+    _FALLBACK_SIZE if left unset. They exist specifically for list_monitors(),
+    which -- unlike get_screen_size() -- takes no per-call size arguments at all
+    (it's a fixed WallpaperPlatform abstract method signature shared with the
+    real hardware-detecting backends), so this is the only place combo_mode =
+    "per_monitor" can be sized on a backend with no real monitor to detect.
+    get_platform() forwards config.toml's screen_width/screen_height here for the
+    "render" override -- see its docstring."""
+
+    def __init__(self, fallback_width: int | None = None, fallback_height: int | None = None):
+        if fallback_width and fallback_height:
+            self._fallback_size = (fallback_width, fallback_height)
+        else:
+            self._fallback_size = _FALLBACK_SIZE
+
     def get_screen_size(
         self,
         span_all_monitors: bool,
@@ -63,9 +80,9 @@ class RenderOnlyPlatform(WallpaperPlatform):
         logging.info(
             "Render-only backend has no display to detect; using %s. Set "
             "screen_width/screen_height in config.toml for a different render size.",
-            _FALLBACK_SIZE,
+            self._fallback_size,
         )
-        return _FALLBACK_SIZE
+        return self._fallback_size
 
     def get_taskbar_height(self) -> int:
         return 0
@@ -77,7 +94,7 @@ class RenderOnlyPlatform(WallpaperPlatform):
         )
 
     def list_monitors(self) -> list[MonitorInfo]:
-        width, height = _FALLBACK_SIZE
+        width, height = self._fallback_size
         return [MonitorInfo(_SYNTHETIC_MONITOR_ID, 0, 0, width, height)]
 
     def apply_wallpaper_per_monitor(self, assignments: dict[str, Path], style: str) -> None:

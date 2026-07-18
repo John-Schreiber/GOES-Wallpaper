@@ -353,7 +353,13 @@ A few non-obvious things learned while building and testing this, not really
     every method is a fixed fallback or a no-op (never applies a desktop wallpaper),
     for headless boxes/containers/CI where only the rendered image (`render_to`)
     matters — see README's "Render-only backend" section. Unlike `"windows"`/`"kde"`,
-    it's never chosen by `"auto"`.
+    it's never chosen by `"auto"`. Its fallback render size is configurable via the
+    same `screen_width`/`screen_height` config already used for real backends'
+    overrides — `get_platform()` forwards them into `RenderOnlyPlatform`'s
+    constructor (as `render_fallback_width`/`height`) specifically so
+    `list_monitors()` can honor them too, since that method (unlike
+    `get_screen_size()`) has no per-call size parameters to take an override
+    through.
 21. **Reprojection (`output_projection`) is low quality: nearest-neighbor only, and
     warps already-drawn overlays instead of redrawing them.** Two related issues in
     `reproject_frame`, both visible in `PROJECTIONS.md`'s gallery:
