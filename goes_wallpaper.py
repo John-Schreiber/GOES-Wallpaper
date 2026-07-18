@@ -231,6 +231,17 @@ class Config:
     # docstring.
     data_dir: Path = DEFAULT_DATA_DIR
     wallpaper_style: str = "fill"  # fill | fit | stretch | tile | center | span
+    # Also apply the same rendered image as the lock screen (not just the desktop
+    # wallpaper) via WallpaperPlatform.apply_lock_screen(). Opt-in, supported on
+    # Windows and KDE Plasma so far (see platform_windows.py/platform_linux_kde.py),
+    # and incompatible with combo_mode = "per_monitor" (the lock screen is a single
+    # image; there's no per-monitor equivalent) -- see validate_lock_screen(), which
+    # raises at startup rather than silently no-op-ing every cycle if either
+    # condition isn't met. Always mirrors the desktop wallpaper exactly -- no
+    # separate source/crop/style of its own yet. NEXT_STEPS.md item 13 tracks giving
+    # it independent framing (e.g. a portrait crop) while still reusing this cycle's
+    # already-downloaded source image rather than fetching a second one.
+    set_lock_screen: bool = False
     # If set, also save the rendered frame(s) here and skip applying them as the
     # desktop wallpaper -- for testing a render (new source_kind, overlays, crop
     # settings) without touching the real wallpaper. combo_mode = "per_monitor"
@@ -656,6 +667,24 @@ _VALID_PLATFORMS = {"auto", "windows", "kde", "macos", "render"}
 def validate_platform(cfg: Config) -> None:
     if cfg.platform not in _VALID_PLATFORMS:
         raise ValueError(f"platform must be one of {sorted(_VALID_PLATFORMS)}, got {cfg.platform!r}")
+
+
+def validate_lock_screen(cfg: Config, platform: WallpaperPlatform) -> None:
+    if not cfg.set_lock_screen:
+        return
+    if not platform.supports_lock_screen():
+        raise ValueError(
+            f"set_lock_screen = true, but {type(platform).__name__} doesn't support "
+            "setting the lock screen image (currently Windows and KDE Plasma only "
+            "-- for KDE, this also means no kwriteconfig6/kwriteconfig5 binary was "
+            "found)."
+        )
+    if cfg.combo_mode == "per_monitor":
+        raise ValueError(
+            'set_lock_screen = true is not supported with combo_mode = "per_monitor" '
+            "(the lock screen is a single image, not per-monitor) -- use "
+            '"single" or "rotate" instead.'
+        )
 
 
 @dataclass(slots=True)
@@ -2196,6 +2225,9 @@ def run_once(cfg: Config, overlays: OverlaysConfig, session: requests.Session, p
     else:
         platform.apply_wallpaper(cfg.wallpaper_path, cfg.wallpaper_style)
         logging.info("Wallpaper applied (style=%s)", cfg.wallpaper_style)
+        if cfg.set_lock_screen:
+            platform.apply_lock_screen(cfg.wallpaper_path)
+            logging.info("Lock screen image applied")
 
     state["last_applied_utc"] = datetime.now(timezone.utc).isoformat()
     save_state(cfg, state)
@@ -2236,6 +2268,9 @@ def run_once_rotate(cfg: Config, overlays: OverlaysConfig, session: requests.Ses
     else:
         platform.apply_wallpaper(cfg.wallpaper_path, cfg.wallpaper_style)
         logging.info("[%s] Wallpaper applied (style=%s)", combo.name, cfg.wallpaper_style)
+        if cfg.set_lock_screen:
+            platform.apply_lock_screen(cfg.wallpaper_path)
+            logging.info("[%s] Lock screen image applied", combo.name)
 
     state["combo_rotation_index"] = (index + 1) % len(cfg.combos)
     state["last_applied_utc"] = datetime.now(timezone.utc).isoformat()
@@ -2375,6 +2410,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
              "monitor with `_monitor{i}` inserted before the extension.",
     )
     p.add_argument("--wallpaper-style", choices=list(WALLPAPER_STYLE_NAMES), dest="wallpaper_style")
+    p.add_argument(
+        "--set-lock-screen", action="store_const", const=True, dest="set_lock_screen",
+        help="Also apply the rendered image as the lock screen image, not just the "
+             "desktop wallpaper (Windows and KDE Plasma only so far; incompatible "
+             'with combo_mode = "per_monitor").',
+    )
     p.add_argument("--no-crop", action="store_const", const=False, dest="crop_to_screen")
     p.add_argument("--no-info-block", action="store_const", const=False, dest="info_block")
     p.add_argument("--span-all-monitors", action="store_const", const=True, dest="span_all_monitors")
@@ -2412,6 +2453,7 @@ def main(argv: list[str] | None = None) -> int:
     validate_lonlat_crop_bounds(cfg)
     validate_output_projection(cfg)
     validate_platform(cfg)
+    validate_lock_screen(cfg, platform)
     setup_logging(cfg)
 
     lock_handle = acquire_instance_lock(cfg)

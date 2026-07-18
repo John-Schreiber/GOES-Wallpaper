@@ -95,6 +95,11 @@ comment; the highlights:
 * **Info block / EXIF** — an overlay bar with satellite/sector/product and
   capture time; the same details are also baked into the JPEG's EXIF tags.
   `avoid_taskbar` (default on) keeps the bar clear of the taskbar/dock.
+* **`set_lock_screen`** (default off) — also apply the same rendered image as the
+  lock screen image, not just the desktop wallpaper. Windows and KDE Plasma only
+  so far (see [Cross-platform](#cross-platform)); not supported with
+  `combo_mode = "per_monitor"`. Always mirrors the desktop wallpaper exactly — no
+  independent crop/style of its own yet.
 * Any field can also be set via CLI flag, e.g. `--sector FD --no-info-block`.
   Run `uv run python goes_wallpaper.py --help` for the full list.
 * **Multi-source combos** — `combo_mode` (`"single"` / `"rotate"` /
@@ -238,13 +243,18 @@ avoidance, battery/network detection) live behind
 `platform = "windows"`/`"kde"`/`"macos"`/`"render"` in config.toml.
 
 * **Windows** — full support via the `IDesktopWallpaper` COM interface, WMI, and
-  WinRT. Every method confirmed on real hardware.
+  WinRT. Every method confirmed on real hardware, including `set_lock_screen`
+  (via WinRT's `LockScreen.SetImageFileAsync()` — works unpackaged and
+  unelevated, contrary to what you might expect from other user-profile WinRT
+  APIs).
 * **KDE Plasma** — talks to Plasma's own D-Bus scripting interface (works under
   both X11 and Wayland), preferring the `plasma-apply-wallpaperimage` CLI when
   present. No `"span"` equivalent (degrades to `"fill"`, logged). The default
-  single-screen path is confirmed on real hardware; `per_monitor` mode and
-  battery/network parsing are unit-tested only — see `NEXT_STEPS.md` item 11.
-  Needs a live desktop session (D-Bus) — see
+  single-screen path is confirmed on real hardware; `per_monitor` mode,
+  battery/network parsing, and `set_lock_screen` (writes to `kscreenlockerrc` via
+  `kwriteconfig6`/`kwriteconfig5`) are unit-tested only, not yet run against a
+  live Plasma session — see `NEXT_STEPS.md` item 11 and item 13. Needs a live
+  desktop session (D-Bus) — see
   [Running periodically](#running-periodically).
 * **macOS** — via `pyobjc`'s `NSWorkspace`/`NSScreen`. No `"tile"`/`"span"`
   equivalent (degrades to `"fill"`, logged). Same verification split as KDE: the

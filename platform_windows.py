@@ -29,10 +29,23 @@ GUIDs/struct layouts, and the INetworkCostManager COM binding specifically faile
 activate in initial testing here while its winrt equivalent worked immediately.
 Desktop wallpaper application and taskbar geometry have no WinRT equivalent (those
 were never exposed outside classic Win32/COM), so they stay as ctypes/COM.
+
+Lock screen: apply_lock_screen() uses WinRT `Windows.System.UserProfile.
+LockScreen.SetImageFileAsync()`. NEXT_STEPS.md flagged this as unverified, on the
+assumption (common for other user-profile/personalization WinRT APIs) that it'd need
+the calling process to have package identity (a packaged/MSIX app). Actually tested
+against real hardware (Windows 11, build 26100) from this project's plain
+uv-managed venv python.exe -- no package identity, no elevation: the call succeeds,
+and LockScreen.original_image_file reads back the path just set, confirmed via the
+`HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lock Screen` registry cache
+entry (which recorded python.exe as the setting app) with the lock screen already in
+single-picture mode (RotatingLockScreenEnabled/SlideshowEnabled both 0 -- Spotlight
+or slideshow modes weren't tested and may behave differently).
 """
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import json
 import logging
@@ -45,7 +58,9 @@ import comtypes
 import comtypes.client
 from comtypes import COMMETHOD, GUID, HRESULT, IUnknown
 from winrt.windows.networking.connectivity import NetworkCostType, NetworkInformation
+from winrt.windows.storage import StorageFile
 from winrt.windows.system.power import BatteryStatus, PowerManager
+from winrt.windows.system.userprofile import LockScreen
 
 from platform_base import MonitorInfo, PowerState, WallpaperPlatform
 
@@ -303,6 +318,25 @@ class WindowsPlatform(WallpaperPlatform):
             return cost_type in (NetworkCostType.FIXED, NetworkCostType.VARIABLE)
         except OSError:
             return None
+
+    def supports_lock_screen(self) -> bool:
+        return True
+
+    def apply_lock_screen(self, path: Path) -> None:
+        """See this module's docstring for what was actually verified about this
+        API running unpackaged/unelevated. Catches OSError like get_power_state/
+        is_network_metered below -- that's the exception type winrt bindings raise
+        for a failed COM call -- so a future edition/build/lock-screen-mode where
+        this doesn't work degrades to a logged warning instead of crashing the
+        whole cycle."""
+        async def _set() -> None:
+            file = await StorageFile.get_file_from_path_async(str(path))
+            await LockScreen.set_image_file_async(file)
+
+        try:
+            asyncio.run(_set())
+        except OSError:
+            logging.warning("Failed to set lock screen image via WinRT LockScreen API", exc_info=True)
 
     def default_data_dir(self) -> Path:
         return Path.home() / "AppData" / "Local" / "GOES-Wallpaper"

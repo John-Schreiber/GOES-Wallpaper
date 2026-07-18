@@ -119,3 +119,30 @@ class TestGetPlatformAutoDetection:
         from platform_linux_kde import KDEPlatform
 
         assert isinstance(platform_base.get_platform(), KDEPlatform)
+
+
+class TestLockScreenDefaults:
+    """supports_lock_screen()/apply_lock_screen() are concrete (not abstract) on
+    WallpaperPlatform so most backends need no override -- exercised here via
+    KDEPlatform (no OS-locked imports, so it runs everywhere) since it doesn't
+    override either. WindowsPlatform's real override is covered separately, gated
+    to win32 only, since it needs the winrt/comtypes deps."""
+
+    def test_unsupported_by_default(self):
+        from platform_linux_kde import KDEPlatform
+
+        assert KDEPlatform().supports_lock_screen() is False
+
+    def test_apply_lock_screen_default_is_a_no_raise_noop(self, tmp_path):
+        from platform_linux_kde import KDEPlatform
+
+        # Degrades gracefully (log + return) like every other WallpaperPlatform
+        # method, rather than raising, even though nothing should call this when
+        # supports_lock_screen() is False (see goes_wallpaper.validate_lock_screen).
+        KDEPlatform().apply_lock_screen(tmp_path / "wallpaper.jpg")
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="platform_windows needs Windows-only comtypes/winrt deps")
+    def test_windows_supports_lock_screen(self):
+        from platform_windows import WindowsPlatform
+
+        assert WindowsPlatform().supports_lock_screen() is True

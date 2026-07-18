@@ -5,6 +5,17 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **`set_lock_screen`** — also apply the rendered image as the lock screen image,
+  not just the desktop wallpaper. Opt-in (default off), supported on Windows (via
+  WinRT's `LockScreen.SetImageFileAsync()`, confirmed working from a plain
+  unpackaged/unelevated process — contrary to the common assumption that
+  user-profile WinRT APIs need MSIX package identity) and KDE Plasma (writes
+  directly to `kscreenlockerrc` via `kwriteconfig6`/`kwriteconfig5`, unit-tested
+  but not yet verified against a live Plasma session). Not supported with
+  `combo_mode = "per_monitor"` (no per-monitor lock screen concept), and always
+  mirrors the desktop wallpaper exactly for now — no independent crop/style. See
+  `WallpaperPlatform.apply_lock_screen`/`supports_lock_screen`,
+  `validate_lock_screen`, and `NEXT_STEPS.md` item 13.
 - **Single-instance locking.** A second goes_wallpaper process (e.g. a duplicate
   `--loop` started without noticing the first was still running) now exits
   immediately with an error instead of racing the first for the same `data_dir`'s

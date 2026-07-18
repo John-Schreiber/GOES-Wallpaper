@@ -33,6 +33,7 @@ the platform layer decoupled from the app's config schema.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from abc import ABC, abstractmethod
@@ -120,6 +121,24 @@ class WallpaperPlatform(ABC):
     def is_network_metered(self) -> bool | None:
         """Best-effort: is the current network connection cost-metered (e.g.
         cellular/tethered)? None if undetectable on this platform."""
+
+    def supports_lock_screen(self) -> bool:
+        """Whether apply_lock_screen() does anything real on this backend. False by
+        default -- concrete (not abstract) so most backends need no override at all.
+        Currently True only for WindowsPlatform (see its module docstring for what
+        was actually verified); no macOS/KDE equivalent has been investigated yet.
+        goes_wallpaper.py's validate_lock_screen() checks this at startup so
+        set_lock_screen = true fails fast on an unsupported backend instead of
+        silently no-op-ing every cycle."""
+        return False
+
+    def apply_lock_screen(self, path: Path) -> None:
+        """Set path as the lock screen image. Only called when supports_lock_screen()
+        is True (validate_lock_screen() enforces this before any cycle runs), but
+        still degrades gracefully -- log and return, don't raise -- like every other
+        method here, in case a backend's underlying API stops working after startup
+        (e.g. an OS update, a permissions change)."""
+        logging.warning("Lock screen image not supported on this backend; ignoring.")
 
     @abstractmethod
     def default_data_dir(self) -> Path:
