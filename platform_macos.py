@@ -16,19 +16,22 @@
 
 """macOS backend for platform_base.WallpaperPlatform.
 
-Unlike platform_windows.py and platform_linux_kde.py (both of which had at least
-their default single-screen path confirmed against real hardware -- see their own
-docstrings), this module has *not* been exercised against a real macOS machine at
-all. It was written from Apple's documented APIs (`NSWorkspace`/`NSScreen` in the
-AppKit framework, reached via the `pyobjc` Python/Objective-C bridge) and known
-community recipes -- most notably the wallpaper-scaling-option mapping, which
-mirrors the community-verified recipe used by the `desktoppr` command-line tool
+Like platform_windows.py and platform_linux_kde.py, this module was originally
+written from Apple's documented APIs (`NSWorkspace`/`NSScreen` in the AppKit
+framework, reached via the `pyobjc` Python/Objective-C bridge) and known community
+recipes -- most notably the wallpaper-scaling-option mapping, which mirrors the
+community-verified recipe used by the `desktoppr` command-line tool
 (https://github.com/scriptingosx/desktoppr, a widely-used macOS-admin utility for
-exactly this job). Treat everything here as "should work per Apple's own docs/a
-known-good community tool" rather than "confirmed against real hardware" until
-someone actually runs it on macOS -- see NEXT_STEPS.md for the exact outstanding
-verification item, same honesty standard platform_linux_kde.py's docstring set for
-itself before its own single-screen path got confirmed live.
+exactly this job) -- rather than against real hardware. The default single-screen
+path (get_screen_size + apply_wallpaper) has since been confirmed on a real
+MacBook with a single (built-in) display. list_monitors/apply_wallpaper_per_monitor
+against real multi-monitor geometry, and get_power_state's `pmset -g batt` parsing
+on battery, are still only exercised through this module's unit tests' mocked
+output, not live hardware -- see NEXT_STEPS.md item 22 for the exact breakdown.
+Treat those untested paths as "should work per Apple's own docs/a known-good
+community tool" rather than "confirmed against real hardware" until someone
+exercises them live, same honesty standard platform_linux_kde.py's docstring set
+for itself before its own single-screen path got confirmed live.
 
 Wallpaper application and screen geometry go through AppKit's `NSWorkspace`/
 `NSScreen` -- the OS's actual supported API for this, not a shell-out hack (like

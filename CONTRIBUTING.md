@@ -12,9 +12,10 @@ through a `FakePlatform` stub rather than real APIs. Not yet covered: `run_once`
 `run_loop` end-to-end (would need mocking `requests.Session` too), and the platform
 backends themselves (`platform_windows.py`, `platform_linux_kde.py`, `platform_macos.py`),
 which are thin enough that manual verification against real hardware has been the
-coverage so far for the first two — see `NEXT_STEPS.md` item 11 for exactly what has
-and hasn't been checked against a real KDE session; `platform_macos.py` hasn't had
-that manual verification pass at all yet (see its own module docstring). `source_satpy.py`
+coverage so far for all three, each at its default single-screen path — see
+`NEXT_STEPS.md` item 11 for exactly what has and hasn't been checked against a real
+KDE session, and item 22 for the same breakdown on macOS (`platform_macos.py`'s
+own module docstring has the short version). `source_satpy.py`
 (the `source_kind = "satpy_raw"` path) has the
 same status for the same reason — its pure band/scan-selection logic is unit tested
 (`tests/test_source_satpy.py`), but real S3 bucket access and satpy compositing need
@@ -29,9 +30,10 @@ avoidance, battery and network-cost detection — lives entirely behind the
 `WallpaperPlatform` abstract interface in `platform_base.py`. `goes_wallpaper.py`
 itself has no OS-specific code at all; it only ever talks to a `WallpaperPlatform`
 instance. Windows, KDE Plasma, and macOS all have working backends already
-(`platform_windows.py`, `platform_linux_kde.py`, `platform_macos.py` — though unlike
-the other two, `platform_macos.py` hasn't been verified against real hardware yet;
-see its module docstring and README's "Cross-platform" section). Any other OS or
+(`platform_windows.py`, `platform_linux_kde.py`, `platform_macos.py` — all three now
+have their default single-screen path confirmed on real hardware, with
+multi-monitor/battery paths still unit-test-only on the latter two; see each
+module's docstring and README's "Cross-platform" section). Any other OS or
 desktop environment (GNOME, Cinnamon, XFCE, etc.) is welcome — none is prioritized
 over another; pick whichever you actually use.
 
@@ -52,9 +54,9 @@ To add a backend:
    in your own PR rather than overclaiming full coverage. `platform_macos.py` is worth
    reading too, mainly for its coordinate-system handling (Cocoa's bottom-up
    `NSScreen` geometry flipped into this project's top-down `MonitorInfo` convention)
-   and `NSWorkspace`'s per-screen API shape — but it's the opposite end of the
-   verification spectrum from the other two: written entirely from Apple's docs and a
-   known community recipe, with *no* real-hardware confirmation at all yet.
+   and `NSWorkspace`'s per-screen API shape — its default single-screen path is now
+   confirmed live on a real MacBook the same as the other two, though multi-monitor
+   and battery-state paths are still unit-test-only (see `NEXT_STEPS.md` item 22).
 3. Implement a new `platform_<name>.py` with a class implementing every
    `WallpaperPlatform` method. It must not import from `goes_wallpaper.py` (that
    would be circular — `goes_wallpaper.py` imports `platform_base`, not the other way

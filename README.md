@@ -29,9 +29,9 @@ showing satellite/sector/product and capture time.
     older Plasma 5 falls back to D-Bus scripting — see "Cross-platform" below). Other
     Linux desktop environments (GNOME, etc.) aren't implemented yet.
   * **macOS**, via `pyobjc`'s `NSWorkspace`/`NSScreen` bindings (see "Cross-platform"
-    below) — implemented against Apple's documented APIs and a known-good community
-    recipe, but **not yet verified against a real Mac**; treat it as unconfirmed until
-    someone runs it live.
+    below) — the default single-screen path has been confirmed on a real MacBook;
+    multi-monitor and battery-state detection are still only unit-tested, not
+    live-verified (see "Cross-platform" below).
 * [uv](https://docs.astral.sh/uv/) (recommended) or a manual venv + `pip install -e .`
 
 ## Setup
@@ -485,12 +485,14 @@ Known limitations:
   tiling mode (removed from System Settings' own UI in recent macOS) and no
   spanning mode (inherently per-`NSScreen`) — both degrade to `"fill"` with a logged
   warning, the same pattern the KDE backend uses for `"span"`.
-* **Verification status: unverified against real hardware.** Unlike the Windows and
-  KDE backends (each confirmed live at least for their default single-screen path),
-  this backend has only been written against Apple's documented APIs and the
-  `desktoppr` recipe above — nobody has run it on an actual Mac yet. Treat every
-  method here as "should work per the docs" rather than "confirmed," and see
-  `NEXT_STEPS.md`'s newest item for the outstanding verification work.
+* **Verification status: single-screen path confirmed, multi-monitor still open.**
+  The default single-screen apply path (`get_screen_size` + `apply_wallpaper`) has
+  been confirmed on a real MacBook with a single (built-in) display, the same
+  verification bar as the Windows and KDE backends' default paths. `list_monitors`/
+  `apply_wallpaper_per_monitor` against real multi-monitor geometry and
+  `get_power_state`'s `pmset -g batt` parsing on battery are still only covered by
+  the unit tests' mocked output, not live multi-monitor/battery hardware — see
+  `NEXT_STEPS.md` item 22 for specifics.
 
 ### Adding another OS/desktop environment
 
@@ -500,8 +502,9 @@ To port to a new OS or Linux desktop environment: implement every method on
 needs to do and how each existing implementation validated against real hardware —
 `platform_macos.py` is a third reference implementation worth reading too, mainly
 for how it handles Cocoa's bottom-up screen-coordinate system and NSWorkspace's
-per-screen API shape, though unlike the other two it hasn't itself been verified
-against real hardware yet), then add a branch for it in `platform_base.
+per-screen API shape; its default single-screen path is now confirmed live like the
+other two, though its multi-monitor/battery paths are still unit-test-only, see
+"macOS backend" above), then add a branch for it in `platform_base.
 get_platform()`. A backend for any other OS or desktop environment (GNOME, Cinnamon,
 XFCE, etc.) is welcome — none prioritized over another, pick whichever you actually
 use. Contributions beyond new platform backends
