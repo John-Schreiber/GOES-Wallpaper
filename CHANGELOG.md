@@ -5,6 +5,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Overlay GeoJSON cache pruning.** `overlay_geojson_cache_*.png`/`.json` pairs
+  in `data_dir` orphaned by a removed/renamed `geojson_sources` entry, or one
+  that changed satellite/resolution/style (minting a new cache identity), are
+  now deleted automatically once unused for `overlay_cache_max_age_days` (30 by
+  default; 0 disables it) — previously these sat in `data_dir` forever. A cache
+  pair still actively matched every cycle is never pruned, however old its
+  content is: `render_static_geojson_overlay` now touches both files' mtimes on
+  every cache *hit*, not just on rebuild, and pruning is driven by that mtime.
+  See `prune_stale_geojson_cache`, called once per cycle from each `run_once*`.
 - `platform = "render"` — a third `WallpaperPlatform` backend
   (`platform_render.RenderOnlyPlatform`) for headless boxes with no desktop shell at
   all (a server, a container, an SSH session, CI): `apply_wallpaper`/
@@ -53,6 +62,21 @@ the precedent `PROJECTIONS.md` already set for `output_projection`:
   (`--loop`, Windows Task Scheduler, systemd `--user` timer).
 
 `README.md` itself now carries short pointer paragraphs in their place.
+
+### Changed — docs rewrite for concision; simplified install instructions
+
+`README.md`, `CONTRIBUTING.md`, `RUNNING.md`, `OVERLAYS.md`, `PROJECTIONS.md`,
+and `ATTRIBUTION.md` were all tightened for concision — no content dropped,
+just less restating and fewer parenthetical asides.
+
+- The "install a pre-built release" instructions no longer query the GitHub
+  API for the latest wheel and download it — `uv tool install
+  git+https://github.com/John-Schreiber/GOES-Wallpaper` installs straight from
+  the repo (or a pinned `@vX.Y.Z` tag) in one command, identical on every
+  OS/shell. The "build a wheel yourself from a checkout" install path (`uv
+  build` + `uv tool install dist\*.whl`) is no longer documented as a separate
+  option — a source checkout (`uv sync`) or the git install above cover the
+  same two use cases (development vs. just running it) more directly.
 
 ## [2.2.0] — 2026-07-18 — KDE Plasma backend, reprojection, lon/lat crop
 

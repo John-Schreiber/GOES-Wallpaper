@@ -11,6 +11,7 @@ written, reused, and invalidated on the right triggers, not just that rendering 
 share the same underlying drawing code)."""
 
 import json
+import os
 import time
 
 import numpy as np
@@ -305,3 +306,91 @@ class TestDrawOverlaysWiring:
         mesoscale = gw.resolve_source(gw.Config(satellite="GOES18", sector="M1"), None)
         out = gw.draw_overlays(_blank(), cfg, overlays, mesoscale)  # must not raise
         assert _nonblack_pixel_count(out) == 0
+
+
+def _backdate(*paths, days):
+    """Set each path's mtime `days` in the past, for exercising prune_stale_geojson_
+    cache's age check without an actual multi-day-old file."""
+    stamp = time.time() - days * 86400
+    for path in paths:
+        os.utime(path, (stamp, stamp))
+
+
+class TestPruneStaleGeojsonCache:
+    def _cached_pair(self, tmp_path, name="cities"):
+        """Render one geojson_sources entry so it has a real cache pair on disk,
+        then return (cfg, png_path, json_path) for the test to age/prune. Diffs
+        against data_dir's contents before the render so a second call against the
+        same (shared) data_dir -- for tests that need two independent entries --
+        picks out only the pair this call just created, not an earlier one too."""
+        geojson_path = tmp_path / "src.geojson"
+        _write_geojson(geojson_path, SF_POINT)
+        data_dir = tmp_path / "data"
+        pngs_before = set(data_dir.glob("overlay_geojson_cache_*.png")) if data_dir.exists() else set()
+        cfg = gw.Config(data_dir=data_dir)
+        source = gw.GeoJSONSource(name=name, files=(str(geojson_path),))
+        gw.render_static_geojson_overlay(_blank(), cfg, _source(), source)
+        [png] = set(data_dir.glob("overlay_geojson_cache_*.png")) - pngs_before
+        meta = png.with_suffix(".json")
+        return cfg, png, meta
+
+    def test_deletes_a_pair_older_than_max_age(self, tmp_path):
+        cfg, png, meta = self._cached_pair(tmp_path)
+        cfg = gw.replace(cfg, overlay_cache_max_age_days=30)
+        _backdate(png, meta, days=31)
+
+        gw.prune_stale_geojson_cache(cfg)
+
+        assert not png.exists()
+        assert not meta.exists()
+
+    def test_keeps_a_pair_within_max_age(self, tmp_path):
+        cfg, png, meta = self._cached_pair(tmp_path)
+        cfg = gw.replace(cfg, overlay_cache_max_age_days=30)
+        _backdate(png, meta, days=29)
+
+        gw.prune_stale_geojson_cache(cfg)
+
+        assert png.exists()
+        assert meta.exists()
+
+    def test_zero_max_age_disables_pruning(self, tmp_path):
+        cfg, png, meta = self._cached_pair(tmp_path)
+        cfg = gw.replace(cfg, overlay_cache_max_age_days=0)
+        _backdate(png, meta, days=365)
+
+        gw.prune_stale_geojson_cache(cfg)
+
+        assert png.exists()
+        assert meta.exists()
+
+    def test_only_the_stale_pair_is_removed(self, tmp_path):
+        cfg, fresh_png, fresh_meta = self._cached_pair(tmp_path, name="fresh")
+        _, stale_png, stale_meta = self._cached_pair(tmp_path, name="stale")
+        cfg = gw.replace(cfg, overlay_cache_max_age_days=30)
+        _backdate(stale_png, stale_meta, days=45)
+
+        gw.prune_stale_geojson_cache(cfg)
+
+        assert not stale_png.exists() and not stale_meta.exists()
+        assert fresh_png.exists() and fresh_meta.exists()
+
+    def test_cache_hit_touches_mtime_so_an_active_entry_survives_pruning(self, tmp_path):
+        # An entry a running config still matches every cycle must never be pruned,
+        # however old its content is -- render_static_geojson_overlay is expected to
+        # touch both cache files' mtimes on every hit, not just on rebuild.
+        cfg, png, meta = self._cached_pair(tmp_path)
+        _backdate(png, meta, days=45)
+
+        source = gw.GeoJSONSource(name="cities", files=(str(tmp_path / "src.geojson"),))
+        gw.render_static_geojson_overlay(_blank(), cfg, _source(), source)  # cache hit, re-touches mtime
+
+        cfg = gw.replace(cfg, overlay_cache_max_age_days=30)
+        gw.prune_stale_geojson_cache(cfg)
+
+        assert png.exists()
+        assert meta.exists()
+
+    def test_missing_data_dir_is_a_noop(self, tmp_path):
+        cfg = gw.Config(data_dir=tmp_path / "never_created")
+        gw.prune_stale_geojson_cache(cfg)  # must not raise

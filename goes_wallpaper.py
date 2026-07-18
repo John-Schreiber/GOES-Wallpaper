@@ -235,6 +235,15 @@ class Config:
     # settings) without touching the real wallpaper. combo_mode = "per_monitor"
     # writes one file per monitor, with `_monitor{i}` inserted before the extension.
     render_to: Path | None = None
+    # Prunes overlay_geojson_cache_*.png/.json pairs (see render_static_geojson_
+    # overlay) that haven't been rebuilt *or reused* in this many days. A
+    # geojson_sources entry that's removed, renamed, or gets a new satellite/
+    # resolution/style mints a new cache identity and orphans its old one, which
+    # would otherwise sit in data_dir forever -- see prune_stale_geojson_cache.
+    # A cache pair still actively matched every cycle never goes stale by this
+    # measure, however old its content is, since every reuse touches its mtime.
+    # 0 (or negative) disables pruning.
+    overlay_cache_max_age_days: float = 30.0
 
     # Screen handling
     crop_to_screen: bool = True
@@ -1508,6 +1517,12 @@ def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: Effecti
         try:
             if json.loads(cache_meta.read_text()) == key:
                 layer = Image.open(cache_png).convert("RGBA")
+                # Touch both files so prune_stale_geojson_cache's mtime-based check
+                # reflects last *use*, not just last rebuild -- an entry matched every
+                # cycle must never look stale, however old its content is.
+                now = time.time()
+                os.utime(cache_png, (now, now))
+                os.utime(cache_meta, (now, now))
         except (OSError, json.JSONDecodeError):
             layer = None
 
@@ -1538,6 +1553,34 @@ def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: Effecti
     base = img.convert("RGBA")
     base.alpha_composite(layer)
     return base.convert("RGB")
+
+
+def prune_stale_geojson_cache(cfg: Config) -> None:
+    """Delete overlay_geojson_cache_<id>.png/.json pairs in cfg.data_dir that
+    haven't been rebuilt or reused (see render_static_geojson_overlay, which
+    touches both files' mtimes on every cache hit, not just on rebuild) in more
+    than cfg.overlay_cache_max_age_days days. Catches entries orphaned by a
+    removed/renamed geojson_sources entry, or one that got a new satellite/
+    resolution/style and so now hashes to a different cache identity -- the old
+    identity's files are never revisited by anything else and would otherwise sit
+    in data_dir forever. A no-op if data_dir doesn't exist yet or
+    overlay_cache_max_age_days <= 0."""
+    if cfg.overlay_cache_max_age_days <= 0:
+        return
+    cutoff = time.time() - cfg.overlay_cache_max_age_days * 86400
+    for meta_path in cfg.data_dir.glob("overlay_geojson_cache_*.json"):
+        try:
+            stale = meta_path.stat().st_mtime < cutoff
+        except OSError:
+            continue
+        if not stale:
+            continue
+        for path in (meta_path, meta_path.with_suffix(".png")):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as e:
+                logging.warning("Couldn't remove stale overlay cache file %s: %s", path, e)
+        logging.info("Pruned stale overlay cache entry %s (unused for over %g days)", meta_path.stem, cfg.overlay_cache_max_age_days)
 
 
 def draw_overlays(img: Image.Image, cfg: Config, overlays: OverlaysConfig, source: EffectiveSource, area: AreaInfo | None = None) -> Image.Image:
@@ -2024,6 +2067,7 @@ def run_once(cfg: Config, overlays: OverlaysConfig, session: requests.Session, p
     source. Returns True if the wallpaper changed."""
     if should_skip_for_power(cfg, platform):
         return False
+    prune_stale_geojson_cache(cfg)
 
     state = load_state(cfg)
     source = resolve_source(cfg, None)
@@ -2061,6 +2105,7 @@ def run_once_rotate(cfg: Config, overlays: OverlaysConfig, session: requests.Ses
         raise ValueError('combo_mode = "rotate" requires at least one [[combos]] entry')
     if should_skip_for_power(cfg, platform):
         return False
+    prune_stale_geojson_cache(cfg)
 
     state = load_state(cfg)
     index = state.get("combo_rotation_index", 0) % len(cfg.combos)
@@ -2102,6 +2147,7 @@ def run_once_per_monitor(cfg: Config, overlays: OverlaysConfig, session: request
         raise ValueError('combo_mode = "per_monitor" requires at least one [[combos]] entry')
     if should_skip_for_power(cfg, platform):
         return False
+    prune_stale_geojson_cache(cfg)
 
     state = load_state(cfg)
     by_monitor = {combo.monitor: combo for combo in cfg.combos if combo.monitor is not None}
