@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "goes-wallpaper"
 version = "2.2.0"
-description = "Update your desktop wallpaper (Windows or KDE Plasma) to the latest GOES satellite image"
+description = "Update your desktop wallpaper (Windows, KDE Plasma, or macOS) to the latest GOES satellite image"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.11"
@@ -17,6 +17,7 @@ dependencies = [
     "comtypes>=1.4.16; sys_platform == 'win32'",
     "winrt-windows-networking-connectivity>=3.2.1; sys_platform == 'win32'",
     "winrt-windows-system-power>=3.2.1; sys_platform == 'win32'",
+    "pyobjc-framework-Cocoa>=10.3.1; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
@@ -76,5 +77,6 @@ include = [
     "platform_base.py",
     "platform_windows.py",
     "platform_linux_kde.py",
+    "platform_macos.py",
     "source_satpy.py",
 ]

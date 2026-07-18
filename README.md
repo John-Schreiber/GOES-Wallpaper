@@ -1,9 +1,9 @@
 # GOES Desktop Wallpaper Updater
 
 A Python script that downloads the most recent image from a GOES weather satellite
-(NOAA STAR's public CDN) and sets it as the desktop wallpaper — on Windows or KDE
-Plasma (Linux) — cropped exactly to your screen, with an optional info bar showing
-satellite/sector/product and capture time.
+(NOAA STAR's public CDN) and sets it as the desktop wallpaper — on Windows, KDE
+Plasma (Linux), or macOS — cropped exactly to your screen, with an optional info bar
+showing satellite/sector/product and capture time.
 
 ![Sample GOES-18 GEOCOLOR wallpaper](sample_wallpaper.jpg)
 
@@ -23,11 +23,15 @@ satellite/sector/product and capture time.
 
 ## Requirements
 
-* Python 3.11+, and either:
+* Python 3.11+, and one of:
   * **Windows**, or
   * **Linux running KDE Plasma** (5.24+ recommended, for `plasma-apply-wallpaperimage`;
     older Plasma 5 falls back to D-Bus scripting — see "Cross-platform" below). Other
     Linux desktop environments (GNOME, etc.) aren't implemented yet.
+  * **macOS**, via `pyobjc`'s `NSWorkspace`/`NSScreen` bindings (see "Cross-platform"
+    below) — implemented against Apple's documented APIs and a known-good community
+    recipe, but **not yet verified against a real Mac**; treat it as unconfirmed until
+    someone runs it live.
 * [uv](https://docs.astral.sh/uv/) (recommended) or a manual venv + `pip install -e .`
 
 ## Setup
@@ -419,17 +423,17 @@ gracefully on hardware/platforms that can't detect it — unknown is always trea
 
 OS-specific operations (applying the wallpaper, screen/monitor detection, taskbar/dock
 avoidance, battery/network-cost detection) live behind `platform_base.WallpaperPlatform`,
-implemented by `platform_windows.WindowsPlatform` and `platform_linux_kde.KDEPlatform`.
-`goes_wallpaper.py` itself — the fetch/crop/overlay/combo/scheduling logic — has no
-OS-specific code in it; `platform_base.get_platform()` picks a backend automatically
-from `sys.platform` (Windows) or `XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP`
-containing `"kde"` (Linux) and raises `NotImplementedError` for any other Linux
-desktop environment.
+implemented by `platform_windows.WindowsPlatform`, `platform_linux_kde.KDEPlatform`,
+and `platform_macos.MacOSPlatform`. `goes_wallpaper.py` itself — the fetch/crop/
+overlay/combo/scheduling logic — has no OS-specific code in it; `platform_base.
+get_platform()` picks a backend automatically from `sys.platform` (Windows, macOS) or
+`XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP` containing `"kde"` (Linux) and raises
+`NotImplementedError` for any other Linux desktop environment.
 
-Set `platform` in config.toml (`"auto"` default, or explicit `"windows"`/`"kde"`) to
-short-circuit that detection — e.g. a Plasma session where `XDG_CURRENT_DESKTOP`
-isn't set the way Plasma normally sets it, or for testing a specific backend. No CLI
-flag for this yet; config.toml only.
+Set `platform` in config.toml (`"auto"` default, or explicit `"windows"`/`"kde"`/
+`"macos"`) to short-circuit that detection — e.g. a Plasma session where
+`XDG_CURRENT_DESKTOP` isn't set the way Plasma normally sets it, or for testing a
+specific backend. No CLI flag for this yet; config.toml only.
 
 ### KDE Plasma backend
 
@@ -464,18 +468,47 @@ Known limitations:
   tests' mocked subprocess output, not live multi-monitor/battery/metered-network
   hardware — see `NEXT_STEPS.md` item 11 for specifics.
 
+### macOS backend
+
+`platform_macos.MacOSPlatform` uses `pyobjc`'s `AppKit`/`Foundation` bridge to call
+`NSWorkspace`/`NSScreen` directly — the OS's actual supported API for setting the
+desktop image and reading screen geometry, not a shell-out hack. Wallpaper-scaling
+options are mapped per style using the same recipe as the community `desktoppr` tool
+(https://github.com/scriptingosx/desktoppr). Battery state shells out to `pmset -g
+batt` (mirroring the KDE backend's `upower`/`nmcli` approach); there's no reliable
+API for per-network metered/"Low Data Mode" status, so `is_network_metered()` always
+returns `None` on macOS.
+
+Known limitations:
+
+* **No "tile" or "span" equivalent.** `NSWorkspace`'s desktop-image options have no
+  tiling mode (removed from System Settings' own UI in recent macOS) and no
+  spanning mode (inherently per-`NSScreen`) — both degrade to `"fill"` with a logged
+  warning, the same pattern the KDE backend uses for `"span"`.
+* **Verification status: unverified against real hardware.** Unlike the Windows and
+  KDE backends (each confirmed live at least for their default single-screen path),
+  this backend has only been written against Apple's documented APIs and the
+  `desktoppr` recipe above — nobody has run it on an actual Mac yet. Treat every
+  method here as "should work per the docs" rather than "confirmed," and see
+  `NEXT_STEPS.md`'s newest item for the outstanding verification work.
+
 ### Adding another OS/desktop environment
 
 To port to a new OS or Linux desktop environment: implement every method on
 `WallpaperPlatform` in a new `platform_<name>.py` (see `platform_windows.py`'s and
 `platform_linux_kde.py`'s docstrings and method-by-method comments for what each one
-needs to do and how each existing implementation validated against real hardware),
-then add a branch for it in `platform_base.get_platform()`. A backend for any other
-OS or desktop environment (GNOME, macOS, etc.) is welcome — none prioritized over
-another, pick whichever you actually use. Contributions beyond new platform backends
+needs to do and how each existing implementation validated against real hardware —
+`platform_macos.py` is a third reference implementation worth reading too, mainly
+for how it handles Cocoa's bottom-up screen-coordinate system and NSWorkspace's
+per-screen API shape, though unlike the other two it hasn't itself been verified
+against real hardware yet), then add a branch for it in `platform_base.
+get_platform()`. A backend for any other OS or desktop environment (GNOME, Cinnamon,
+XFCE, etc.) is welcome — none prioritized over another, pick whichever you actually
+use. Contributions beyond new platform backends
 are welcome too. Note that `pyproject.toml` marks platform-specific Python
-*package* dependencies (`comtypes`, the `winrt-*` packages) with `sys_platform ==
-'win32'` markers; the KDE backend instead depends on external binaries
+*package* dependencies (`comtypes`, the `winrt-*` packages, `pyobjc-framework-Cocoa`)
+with `sys_platform == 'win32'`/`'darwin'` markers; the KDE backend instead depends on
+external binaries
 (`qdbus6`/`qdbus`, `plasma-apply-wallpaperimage`, `upower`, `nmcli`) that aren't
 `pyproject.toml` dependencies at all — it degrades gracefully (logs a warning, returns
 an "unknown"/conservative default) if one is missing rather than failing to import.

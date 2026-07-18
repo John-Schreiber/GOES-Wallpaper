@@ -367,3 +367,22 @@ A few non-obvious things learned while building and testing this, not really
     pixels) directly instead of warping pixels already drawn in the source grid —
     would also want `pyresample`/similar for the base-image resampling at that
     point, since it'd be adding a real dependency anyway.
+22. **A third backend now exists (`platform_macos.MacOSPlatform`) but has zero
+    real-hardware verification**, unlike `platform_windows.py` (every method
+    confirmed live) and `platform_linux_kde.py` (default single-screen path
+    confirmed live, see item 11). It was built entirely from Apple's documented
+    `NSWorkspace`/`NSScreen` (`AppKit`/`Foundation` via `pyobjc`) APIs and the
+    community-verified `desktoppr` tool's wallpaper-scaling-option mapping
+    (https://github.com/scriptingosx/desktoppr) — nobody has run it on an actual
+    Mac. Every method is equally outstanding: `get_screen_size`/`list_monitors`'
+    Cocoa-bottom-up-to-top-down coordinate flip, `apply_wallpaper`/
+    `apply_wallpaper_per_monitor`'s `NSWorkspace.setDesktopImageURL_forScreen_
+    options_error_` calls and style mapping (including the "tile"/"span" →
+    "fill" degradation), `get_taskbar_height`'s `visibleFrame.origin.y` Dock-height
+    reasoning, and `get_power_state`'s `pmset -g batt` parsing (including the
+    no-battery-present desktop-Mac case). Whoever picks this up next should run
+    each of these against a real Mac (ideally with an external monitor to exercise
+    `list_monitors`/`apply_wallpaper_per_monitor`, and on battery to exercise
+    `get_power_state`) and update `platform_macos.py`'s module docstring plus
+    README's "macOS backend" section with what's actually confirmed, the same way
+    item 11 documents KDE's verification gaps.

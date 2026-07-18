@@ -10,26 +10,30 @@ uv run pytest
 No network access or real hardware required — platform-specific logic is exercised
 through a `FakePlatform` stub rather than real APIs. Not yet covered: `run_once`/
 `run_loop` end-to-end (would need mocking `requests.Session` too), and the platform
-backends themselves (`platform_windows.py`, `platform_linux_kde.py`), which are thin
-enough that manual verification against real hardware has been the coverage so far —
-see `NEXT_STEPS.md` item 11 for exactly what has and hasn't been checked against a
-real KDE session. `source_satpy.py` (the `source_kind = "satpy_raw"` path) has the
+backends themselves (`platform_windows.py`, `platform_linux_kde.py`, `platform_macos.py`),
+which are thin enough that manual verification against real hardware has been the
+coverage so far for the first two — see `NEXT_STEPS.md` item 11 for exactly what has
+and hasn't been checked against a real KDE session; `platform_macos.py` hasn't had
+that manual verification pass at all yet (see its own module docstring). `source_satpy.py`
+(the `source_kind = "satpy_raw"` path) has the
 same status for the same reason — its pure band/scan-selection logic is unit tested
 (`tests/test_source_satpy.py`), but real S3 bucket access and satpy compositing need
 `uv sync --extra satpy-raw` and a live fetch to verify (`--render-to`, see README's
 "Tests" section, is the quickest way to do that without touching your desktop
 wallpaper).
 
-## Adding a platform backend (GNOME/macOS/other)
+## Adding a platform backend (GNOME/other)
 
 OS-specific behavior — applying the wallpaper, screen/monitor detection, taskbar/dock
 avoidance, battery and network-cost detection — lives entirely behind the
 `WallpaperPlatform` abstract interface in `platform_base.py`. `goes_wallpaper.py`
 itself has no OS-specific code at all; it only ever talks to a `WallpaperPlatform`
-instance. Windows and KDE Plasma both have working backends already
-(`platform_windows.py`, `platform_linux_kde.py`). Any other OS or desktop environment
-(GNOME, macOS, Cinnamon, XFCE, etc.) is welcome — none is prioritized over another;
-pick whichever you actually use.
+instance. Windows, KDE Plasma, and macOS all have working backends already
+(`platform_windows.py`, `platform_linux_kde.py`, `platform_macos.py` — though unlike
+the other two, `platform_macos.py` hasn't been verified against real hardware yet;
+see its module docstring and README's "Cross-platform" section). Any other OS or
+desktop environment (GNOME, Cinnamon, XFCE, etc.) is welcome — none is prioritized
+over another; pick whichever you actually use.
 
 To add a backend:
 
@@ -45,7 +49,12 @@ To add a backend:
    real-hardware confirmation too, with `per_monitor` mode and a few other paths still
    only unit-tested (again, see `NEXT_STEPS.md` item 11) — a good concrete example of
    what "shipped but partially verified" looks like and how to document that honestly
-   in your own PR rather than overclaiming full coverage.
+   in your own PR rather than overclaiming full coverage. `platform_macos.py` is worth
+   reading too, mainly for its coordinate-system handling (Cocoa's bottom-up
+   `NSScreen` geometry flipped into this project's top-down `MonitorInfo` convention)
+   and `NSWorkspace`'s per-screen API shape — but it's the opposite end of the
+   verification spectrum from the other two: written entirely from Apple's docs and a
+   known community recipe, with *no* real-hardware confirmation at all yet.
 3. Implement a new `platform_<name>.py` with a class implementing every
    `WallpaperPlatform` method. It must not import from `goes_wallpaper.py` (that
    would be circular — `goes_wallpaper.py` imports `platform_base`, not the other way
