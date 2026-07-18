@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "goes-wallpaper"
-version = "2.0.0"
+version = "2.1.0"
 description = "Update a Windows desktop wallpaper to the latest GOES satellite image"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
@@ -71,4 +71,10 @@ testpaths = ["tests"]
 # platform_windows as top-level sibling modules (not relative/package-qualified), so
 # all three need to land next to each other in the wheel, matching how they sit in
 # the repo.
-include = ["goes_wallpaper.py", "platform_base.py", "platform_windows.py", "source_satpy.py"]
+include = [
+    "goes_wallpaper.py",
+    "platform_base.py",
+    "platform_windows.py",
+    "platform_linux_kde.py",
+    "source_satpy.py",
+]

@@ -9,6 +9,13 @@
 # this file is placed at the very end, after all the plain scalar settings — keep new
 # scalar settings above them, not between them.
 
+# --- Platform ---
+# Which platform_base.WallpaperPlatform backend to use. "auto" (default) detects
+# from sys.platform / XDG_CURRENT_DESKTOP, same as always. Set this explicitly only
+# if that detection picks the wrong backend or fails (e.g. a KDE session whose
+# XDG_CURRENT_DESKTOP/XDG_SESSION_DESKTOP isn't set the way Plasma normally sets it).
+# platform = "kde"  # "auto" | "windows" | "kde"
+
 # --- Source image ---
 satellite = "GOES19"      # GOES19 (East) or GOES18 (West)
 sector = "CONUS"          # CONUS | FD (Full Disk) | M1 | M2 (Mesoscale)
@@ -73,11 +80,53 @@ source_crop_top = 0.0
 source_crop_right = 1.0
 source_crop_bottom = 1.0
 
-# --- Georeferenced overlays (optional, CONUS only) ---
+# Alternative to source_crop_left/top/right/bottom above: frame the region of
+# interest by a lon/lat bounding box instead. All four must be set together; when set,
+# this takes precedence over the fractional crop above. Requires georeferencing
+# calibration for the resolved satellite/sector (CONUS/Full Disk on the default
+# cdn_jpg source, any sector on satpy_raw) -- falls back to the fractional crop,
+# logged, if calibration isn't available (e.g. Mesoscale on cdn_jpg).
+# source_crop_min_lon = -112.0
+# source_crop_min_lat = 33.0
+# source_crop_max_lon = -105.0
+# source_crop_max_lat = 40.0
+
+# Reproject the rendered frame into a different map projection instead of the
+# satellite's native GEOS view. See PROJECTIONS.md for example renders of each.
+#
+# Bounds-framed (use source_crop_min_lon/min_lat/max_lon/max_lat above -- required in
+# these modes, those bounds become the reprojected output's extent, replacing rather
+# than stacking with the region-of-interest crop):
+#   "platecarree"      - equirectangular.
+#   "lambertconformal" - conformal conic; the standard choice for a mid-latitude
+#                        regional map (what NWS/NOAA's own CONUS maps use) --
+#                        negligible distortion for a CONUS-sized box, unlike
+#                        platecarree/mercator. Standard parallels default to 1/6 and
+#                        5/6 up the box's latitude range; override with
+#                        output_projection_lcc_lat1/_lcc_lat2 below for specific ones.
+#
+# Center-framed (use output_projection_center_lon/_center_lat below, defaulting to the
+# resolved source's own satellite sub-point / the equator):
+#   "orthographic"     - a globe view as seen from space; pixels beyond the visible
+#                        hemisphere render black.
+#   "lambertazimuthal" - equal-area azimuthal; shows nearly the whole globe (not just
+#                        the visible hemisphere) without Mercator's polar blowup, at
+#                        the cost of shape distortion far from center.
+#
+# "native" (default) means no reprojection. Not combo-overridable. Note: cdn_jpg's
+# baked-in NOAA captions/borders warp along with everything else in any of these.
+output_projection = "native"
+# output_projection_center_lon = -95.0
+# output_projection_center_lat = 25.0
+# output_projection_lcc_lat1 = 33.0
+# output_projection_lcc_lat2 = 45.0
+
+# --- Georeferenced overlays (optional) ---
 # Drawn on the raw fetched frame, before any of our own trim/crop/resize. Adds to,
 # doesn't replace, NOAA's own baked-in state lines (source_crop_* above explains why
-# those can't be removed). Only calibrated for CONUS on GOES18/GOES19 — Full Disk and
-# Mesoscale aren't supported (Mesoscale's extent moves, so it can't be hardcoded).
+# those can't be removed). Calibrated for CONUS and Full Disk on GOES18/GOES19 (cdn_jpg)
+# — Mesoscale isn't supported there (its extent moves, so it can't be hardcoded); any
+# sector works on satpy_raw, which carries real per-frame georeferencing instead.
 overlay_graticule = false          # lat/lon grid lines
 overlay_graticule_step_deg = 10.0
 overlay_graticule_color = [255, 255, 0]
@@ -122,7 +171,10 @@ overlay_shell_font_size = 14
 # Define named source+crop presets and how to use them. Ignored entirely unless
 # combo_mode is set below. Any field left unset on a combo falls back to the
 # top-level satellite/sector/product/resolution above; crop_left/top/right/bottom
-# always apply (default: no crop, same as source_crop_* above).
+# always apply (default: no crop, same as source_crop_* above). crop_min_lon/min_lat/
+# max_lon/max_lat are also available per combo, following source_crop_min_lon's
+# fall-back-to-Config behavior rather than crop_left's always-active one.
+# output_projection itself isn't combo-overridable -- see above.
 #
 # combo_mode:
 #   "single"      (default) - combos below are ignored.

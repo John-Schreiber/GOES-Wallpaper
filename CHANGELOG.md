@@ -5,6 +5,53 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Georeferenced overlays (`overlay_graticule`, `overlay_cities`, `overlay_geojson_files`,
+  `overlay_shell_command`) now work on the `cdn_jpg` path's Full Disk sector (`sector =
+  "FD"`), not just CONUS. Full Disk's GEOS extent is fixed (unlike Mesoscale, which
+  moves) and identical for every GOES-R series satellite regardless of orbital slot, so
+  it's reused directly from satpy's own shipped area definitions
+  (`goes_west`/`east_abi_f_2km`) rather than re-derived. `overlay_geojson_files`'s cache
+  key/filename now also includes `sector`, so CONUS and Full Disk renders of the same
+  satellite/style no longer collide in the cache.
+- `source_crop_min_lon`/`min_lat`/`max_lon`/`max_lat` — an alternative to
+  `source_crop_left`/`top`/`right`/`bottom` that frames the region of interest by a
+  lon/lat bounding box instead of a pixel fraction, converted via the same
+  georeferencing calibration `overlay_*` uses (`lonlat_box_to_crop_fraction`). Also
+  available per `[[combos]]` entry (`crop_min_lon`/etc., falling back to the
+  top-level value like `satellite`/`sector` rather than always applying like
+  `crop_left`/etc.).
+- `output_projection` — reproject the rendered frame into `"platecarree"`
+  (equirectangular) or `"lambertconformal"` (conformal conic, the standard choice for
+  a mid-latitude regional map — negligible distortion for a CONUS-sized box, unlike
+  platecarree/mercator; standard parallels default to 1/6 and 5/6 up the box's
+  latitude range, overridable via `output_projection_lcc_lat1`/`_lat2`), both framed
+  by `source_crop_min_lon`/etc., or `"orthographic"` (a globe view as seen from
+  space) or `"lambertazimuthal"` (equal-area azimuthal, shows nearly the whole globe
+  rather than just the visible hemisphere), both centered on
+  `output_projection_center_lon`/`_center_lat` (defaulting to the source's own
+  satellite sub-point) — instead of the satellite's native GEOS view. Pure
+  nearest-neighbor resampling via `pyproj`/`numpy` (`reproject_frame`) — no new
+  dependency — so this works for both the default `cdn_jpg` source (CONUS/Full Disk)
+  and `satpy_raw` (any sector, via its real per-frame georeferencing). See
+  [PROJECTIONS.md](PROJECTIONS.md) for example renders of each. Pixels outside
+  the visible hemisphere in `"orthographic"` render black.
+- KDE Plasma backend (`platform_linux_kde.KDEPlatform`), auto-selected on Linux when
+  `XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP` contains `"kde"`. Implements the full
+  `WallpaperPlatform` interface via Plasma's D-Bus scripting interface and the
+  `plasma-apply-wallpaperimage` CLI (screen/monitor geometry, per-monitor wallpaper
+  assignment, panel/taskbar height) plus `upower`/`nmcli` for battery/metered-network
+  detection. `wallpaper_style = "span"` degrades to `"fill"` with a logged warning —
+  KDE has no multi-monitor spanning primitive. Default single-screen apply verified
+  against a real Plasma session; `per_monitor` mode and a few other paths are still
+  unit-test-only — see `NEXT_STEPS.md` for the exact breakdown.
+- `platform` config setting (`"auto"`/`"windows"`/`"kde"`) to force
+  `platform_base.get_platform()`'s backend selection instead of relying on
+  `sys.platform`/`XDG_CURRENT_DESKTOP` sniffing — for a Plasma session where that
+  detection is unreliable, or for testing.
+
+## [2.1.0] — 2026-07-17 — GeoJSON overlays and a raw-data source
+
+### Added
 - `overlay_geojson_files` — a list of local GeoJSON files (state/county borders, a
   coastline layer, a fixed marker set) drawn as georeferenced overlays alongside
   `overlay_graticule`/`overlay_cities`. Supports `Point`/`MultiPoint`/`LineString`/
@@ -23,6 +70,50 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - Point/MultiPoint features from either provider above can carry a `properties.name`
   to draw a text label next to the marker, matching how `overlay_cities` labels a
   city.
+- `source_kind = "satpy_raw"` — an opt-in source (behind the new `satpy-raw` install
+  extra) that fetches raw ABI L1b radiance bands directly from the public
+  `noaa-goes16`/`noaa-goes18`/`noaa-goes19` S3 buckets and composites a GeoColor-style
+  image locally with [satpy](https://satpy.readthedocs.io/), instead of fetching NOAA
+  STAR's pre-rendered JPG. No baked-in state lines/logo/fake city lights, and exposes
+  real projection/area info so georeferenced overlays work accurately on Full Disk and
+  Mesoscale sectors too, not just CONUS. Builds its own day/night blend — true-color by
+  day, a muted navy-to-pale-lavender Band 13 brightness-temperature mapping by night,
+  blended at the real per-pixel solar terminator — rather than relying on satpy's stock
+  `geo_color` composite. First cut: no automatic fallback to `cdn_jpg` and no
+  cross-cycle caching of downloaded bands, so it's meaningfully heavier on
+  bandwidth/compute — see the README's "Custom raw-data source (satpy_raw)" section
+  before enabling it on a tight `interval_minutes`.
+
+### Fixed
+- `source_kind = "satpy_raw"` leaked ~98MB (CONUS) / ~550MB (Full Disk) of raw band
+  files into `<data_dir>/satpy_raw_cache` every cycle, since each scan's filenames
+  are unique and nothing ever deleted the previous cycle's files — a 5-minute
+  `--loop` could leak tens of GB/day. `fetch_composite` now clears everything not
+  part of the current scan's selection before downloading it.
+- The info bar's satellite/sector/product text and capture-time text could overlap
+  and render as garbled, overlapping text — most visible on `satpy_raw`'s longer
+  product label (`GeoColor (satpy_raw)`) on a square Full Disk frame, where the bar
+  is proportionally taller relative to the available width than on a widescreen
+  CONUS crop. The font size now shrinks (down to a legibility floor) until both
+  texts fit without overlapping.
+- `state.json`/`wallpaper.json` (and the GeoJSON overlay cache sidecar) were
+  written with a bare `write_text`, so a crash or power loss mid-write could corrupt
+  them — silently discarding every learned publish-time phase and ETag on next
+  load. Both now write through a same-directory temp file + atomic `os.replace`.
+- Full Disk's largest tier (`10848x10848`, ~117.7M pixels) exceeded Pillow's default
+  `MAX_IMAGE_PIXELS` (~89.5M), logging a `DecompressionBombWarning` on every such
+  fetch. Raised to a bounded 130M that covers every known NOAA tier, rather than
+  disabled outright — the guard still does real work against a compromised or
+  misbehaving CDN.
+- `Ctrl-C` during `--loop` exited with a raw traceback (`KeyboardInterrupt` is a
+  `BaseException`, so it skipped both `run_loop`'s and `main()`'s `except
+  Exception` handlers). `main()` now catches it directly for a clean exit.
+- `data_dir`/`info_font_path` defaults were hardcoded to Windows paths
+  (`~/AppData/Local/...`, `C:\Windows\Fonts\...`) directly in the otherwise
+  cross-platform `Config`/`load_config`. `WallpaperPlatform` gained
+  `default_data_dir()`/`default_font_path()`, which `load_config` now prefers when
+  neither config.toml nor a CLI override sets them — a prerequisite for a future
+  Linux/macOS backend, which only needs to implement those two methods.
 
 ## [2.0.0] — 2026-07-16 — full modernization
 

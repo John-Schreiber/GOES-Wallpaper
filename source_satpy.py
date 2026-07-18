@@ -274,8 +274,10 @@ def fetch_composite(
     compares the latest complete scan's time against prev_scan_time_utc, and
     returns None if unchanged -- this IS the 304-equivalent for this source kind,
     there's no HTTP ETag involved. Otherwise downloads the required band files into
-    work_dir (overwritten each call, no cross-cycle caching in v1) and composites
-    them into a GeoColor-style image (see _composite_true_color_with_muted_ir_night)."""
+    work_dir (no cross-cycle caching in v1 -- every prior cycle's band files are
+    deleted first, since each scan's filenames are scan-unique and would otherwise
+    just accumulate forever) and composites them into a GeoColor-style image (see
+    _composite_true_color_with_muted_ir_night)."""
     check_available()
     import s3fs
 
@@ -291,6 +293,17 @@ def fetch_composite(
 
     fs = s3fs.S3FileSystem(anon=True)
     work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Scan-unique filenames (e.g. "...C02_G18_s20241601801173..."): without this,
+    # every cycle's band files pile up in work_dir forever instead of being reused
+    # or replaced (~98MB/cycle for CONUS, ~550MB for Full Disk -- a 5-minute --loop
+    # would otherwise leak tens of GB/day). Clear stale files before downloading the
+    # current selection so peak usage stays at roughly one cycle's worth.
+    keep_names = {Path(key).name for key in selection.keys.values()}
+    for existing in work_dir.iterdir():
+        if existing.is_file() and existing.name not in keep_names:
+            existing.unlink()
+
     local_files = []
     total_bytes = 0
     download_started = time.monotonic()

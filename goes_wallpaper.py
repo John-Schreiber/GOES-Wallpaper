@@ -40,6 +40,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import random
 import subprocess
 import sys
@@ -59,6 +60,14 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from platform_base import MonitorInfo, WallpaperPlatform, WALLPAPER_STYLE_NAMES, get_platform
+
+# Full Disk's largest published tier (10848x10848 = ~117.7M px) exceeds Pillow's
+# default MAX_IMAGE_PIXELS (~89.5M), which logs a DecompressionBombWarning on every
+# such fetch and would hard-error if Pillow's 2x safety threshold ever tightens.
+# Raised to a bounded value that comfortably covers every known NOAA tier -- not
+# disabled (None), since the guard is real protection against a compromised or
+# misbehaving CDN serving an oversized image.
+Image.MAX_IMAGE_PIXELS = 130_000_000
 
 # --------------------------------------------------------------------------- #
 # Configuration
@@ -104,12 +113,20 @@ class Combo:
     crop_top: float = 0.0
     crop_right: float = 1.0
     crop_bottom: float = 1.0
+    # Lon/lat crop-box override -- unlike crop_left/top/right/bottom above, unset
+    # (None) here falls back to Config.source_crop_min_lon/etc rather than always
+    # applying; see Config.source_crop_min_lon.
+    crop_min_lon: float | None = None
+    crop_min_lat: float | None = None
+    crop_max_lon: float | None = None
+    crop_max_lat: float | None = None
     monitor: int | None = None
 
 
 @dataclass(slots=True)
 class CityMarker:
-    """A labeled point for overlay_cities (georeferenced overlay, CONUS only)."""
+    """A labeled point for overlay_cities (georeferenced overlay; CONUS and Full Disk
+    on the cdn_jpg path, any sector via satpy_raw's real per-frame AreaInfo)."""
     name: str
     lon: float
     lat: float
@@ -145,7 +162,18 @@ class Config:
     # See CUSTOM_IMAGERY_PLAN.md for the full design rationale.
     source_kind: str = "cdn_jpg"
 
+    # Which platform_base.WallpaperPlatform backend to use. "auto" (default)
+    # detects from sys.platform / XDG_CURRENT_DESKTOP, same as always -- explicit
+    # "windows"/"kde" short-circuit that detection, e.g. for a KDE session whose
+    # XDG_CURRENT_DESKTOP isn't set reliably. See platform_base.get_platform().
+    platform: str = "auto"  # "auto" | "windows" | "kde"
+
     # Output
+    # This class-level default is Windows-specific and only applies when Config is
+    # constructed directly (as most tests do). The real CLI entry point
+    # (goes_wallpaper.main) goes through load_config(..., platform=...), which
+    # prefers WallpaperPlatform.default_data_dir() instead -- see load_config's
+    # docstring.
     data_dir: Path = DEFAULT_DATA_DIR
     wallpaper_style: str = "fill"  # fill | fit | stretch | tile | center | span
     # If set, also save the rendered frame(s) here and skip applying them as the
@@ -189,14 +217,56 @@ class Config:
     source_crop_right: float = 1.0
     source_crop_bottom: float = 1.0
 
+    # Alternative to source_crop_left/top/right/bottom above: frame the region of
+    # interest by a lon/lat bounding box instead of a pixel fraction. All four must be
+    # set together (validate_lonlat_crop_bounds enforces this); when set, this takes
+    # precedence over source_crop_left/top/right/bottom for the same source. Requires
+    # georeferencing calibration for the resolved satellite/sector (CONUS/Full Disk on
+    # cdn_jpg, any sector on satpy_raw) -- falls back to the fractional crop above,
+    # logged, if calibration isn't available. See lonlat_box_to_crop_fraction.
+    source_crop_min_lon: float | None = None
+    source_crop_min_lat: float | None = None
+    source_crop_max_lon: float | None = None
+    source_crop_max_lat: float | None = None
+
+    # Reproject the rendered frame into a different map projection instead of the
+    # satellite's native GEOS view. "native" (default): no reprojection. Not
+    # combo-overridable. See reproject_frame.
+    #
+    # Bounds-framed (use source_crop_min_lon/min_lat/max_lon/max_lat above, required in
+    # these modes -- those bounds become the reprojected output's extent, replacing
+    # rather than stacking with the region-of-interest crop):
+    #   "platecarree"      -- equirectangular.
+    #   "lambertconformal"  -- conformal conic; the standard choice for a mid-latitude
+    #                         regional map (what NWS/NOAA's own CONUS maps use) --
+    #                         negligible distortion for a CONUS-sized box, unlike
+    #                         platecarree/mercator. Standard parallels default to 1/6
+    #                         and 5/6 of the way up the box's latitude range (a common
+    #                         rule of thumb); override with output_projection_lcc_lat1/
+    #                         _lat2 below if you want specific ones.
+    #
+    # Center-framed (use output_projection_center_lon/_center_lat below, defaulting to
+    # the resolved source's own satellite sub-point / the equator):
+    #   "orthographic"      -- a globe view as seen from space; pixels beyond the
+    #                         visible hemisphere render black.
+    #   "lambertazimuthal"  -- equal-area azimuthal; shows nearly the whole globe (not
+    #                         just the visible hemisphere) without Mercator's polar
+    #                         blowup, at the cost of shape distortion far from center.
+    output_projection: str = "native"
+    output_projection_center_lon: float | None = None
+    output_projection_center_lat: float | None = None
+    output_projection_lcc_lat1: float | None = None
+    output_projection_lcc_lat2: float | None = None
+
     # Georeferenced overlays drawn on the raw fetched frame, before any of our own
-    # trim/crop/resize (so the pixel grid matches the calibration below). CONUS only —
-    # the calibration constants (GEOS projection extent per satellite) were derived
-    # from one real ABI L1b CONUS file per satellite and validated against 10 known
-    # city landmarks (median error well under a pixel at 2500x1500); Full Disk and
-    # Mesoscale aren't supported (Mesoscale's extent isn't fixed — it moves — so it
-    # can't be hardcoded the same way). Adds to, doesn't replace, NOAA's own baked-in
-    # state lines — this can't remove those, see source_crop_* above.
+    # trim/crop/resize (so the pixel grid matches the calibration below). CONUS and
+    # Full Disk only — the CONUS calibration constants (GEOS projection extent per
+    # satellite) were derived from one real ABI L1b CONUS file per satellite and
+    # validated against 10 known city landmarks (median error well under a pixel at
+    # 2500x1500); Full Disk reuses satpy's own published extent (see
+    # _GEOS_AREA_FULL_DISK). Mesoscale isn't supported — its extent isn't fixed, it
+    # moves, so it can't be hardcoded the same way. Adds to, doesn't replace, NOAA's
+    # own baked-in state lines — this can't remove those, see source_crop_* above.
     overlay_graticule: bool = False
     overlay_graticule_step_deg: float = 10.0
     overlay_graticule_color: tuple[int, int, int] = (255, 255, 0)
@@ -254,6 +324,11 @@ class Config:
     info_block: bool = True
     info_block_height_frac: float = 0.055
     info_block_opacity: int = 160  # 0-255
+    # Same caveat as data_dir above: this Windows-specific default only applies when
+    # Config is constructed directly. load_config(..., platform=...) prefers
+    # WallpaperPlatform.default_font_path() instead. Either way, a path that can't
+    # be loaded degrades gracefully to Pillow's built-in default font (see
+    # draw_info_block/_fit_info_bar_font), never raises.
     info_font_path: str = r"C:\Windows\Fonts\segoeui.ttf"
     # The desktop wallpaper renders full-screen behind the taskbar, so a bar drawn at
     # the very bottom edge gets clipped by it. When enabled, the info bar is nudged up
@@ -337,8 +412,14 @@ class Config:
         return self.data_dir / "log.txt"
 
 
-def load_config(config_path: Path, overrides: dict[str, Any]) -> Config:
-    """Build a Config from an optional TOML file, then apply CLI overrides on top."""
+def load_config(config_path: Path, overrides: dict[str, Any], platform: WallpaperPlatform | None = None) -> Config:
+    """Build a Config from an optional TOML file, then apply CLI overrides on top.
+    `platform`, if given, supplies the data_dir/info_font_path defaults when neither
+    the TOML file nor overrides set them -- e.g. Windows' AppData layout means
+    nothing on a future Linux/macOS backend (see WallpaperPlatform.default_data_dir/
+    default_font_path). Left unset (as most tests do, constructing Config directly
+    or calling load_config without a platform), Config's own class-level defaults
+    apply, unchanged from before this existed."""
     values: dict[str, Any] = {}
     if config_path.exists():
         with config_path.open("rb") as f:
@@ -350,6 +431,10 @@ def load_config(config_path: Path, overrides: dict[str, Any]) -> Config:
         raise ValueError(f"Unknown config key(s) in {config_path}: {', '.join(sorted(unknown))}")
 
     values.update({k: v for k, v in overrides.items() if v is not None})
+
+    if platform is not None:
+        values.setdefault("data_dir", platform.default_data_dir())
+        values.setdefault("info_font_path", platform.default_font_path())
 
     if "data_dir" in values:
         values["data_dir"] = Path(values["data_dir"])
@@ -431,6 +516,72 @@ def validate_source_kind(cfg: Config) -> None:
             )
 
 
+def _check_lonlat_bounds(label: str, min_lon: float | None, min_lat: float | None, max_lon: float | None, max_lat: float | None) -> None:
+    values = (min_lon, min_lat, max_lon, max_lat)
+    if all(v is None for v in values):
+        return
+    if any(v is None for v in values):
+        raise ValueError(f"{label}: min_lon/min_lat/max_lon/max_lat must all be set together, or none of them")
+    if min_lon >= max_lon:
+        raise ValueError(f"{label}: min_lon ({min_lon}) must be less than max_lon ({max_lon})")
+    if min_lat >= max_lat:
+        raise ValueError(f"{label}: min_lat ({min_lat}) must be less than max_lat ({max_lat})")
+
+
+def validate_lonlat_crop_bounds(cfg: Config) -> None:
+    _check_lonlat_bounds(
+        "source_crop_min_lon/min_lat/max_lon/max_lat",
+        cfg.source_crop_min_lon, cfg.source_crop_min_lat, cfg.source_crop_max_lon, cfg.source_crop_max_lat,
+    )
+    for combo in cfg.combos:
+        _check_lonlat_bounds(
+            f"combos[{combo.name!r}].crop_min_lon/min_lat/max_lon/max_lat",
+            combo.crop_min_lon, combo.crop_min_lat, combo.crop_max_lon, combo.crop_max_lat,
+        )
+
+
+_VALID_OUTPUT_PROJECTIONS = {"native", "platecarree", "lambertconformal", "orthographic", "lambertazimuthal"}
+_BOUNDS_FRAMED_PROJECTIONS = {"platecarree", "lambertconformal"}
+
+
+def validate_output_projection(cfg: Config) -> None:
+    if cfg.output_projection not in _VALID_OUTPUT_PROJECTIONS:
+        raise ValueError(
+            f"output_projection must be one of {sorted(_VALID_OUTPUT_PROJECTIONS)}, got {cfg.output_projection!r}"
+        )
+    if cfg.output_projection == "lambertconformal":
+        if (cfg.output_projection_lcc_lat1 is None) != (cfg.output_projection_lcc_lat2 is None):
+            raise ValueError("output_projection_lcc_lat1/lcc_lat2 must both be set together, or neither")
+        if cfg.output_projection_lcc_lat1 is not None and cfg.output_projection_lcc_lat1 >= cfg.output_projection_lcc_lat2:
+            raise ValueError(
+                f"output_projection_lcc_lat1 ({cfg.output_projection_lcc_lat1}) must be less than "
+                f"output_projection_lcc_lat2 ({cfg.output_projection_lcc_lat2})"
+            )
+    if cfg.output_projection not in _BOUNDS_FRAMED_PROJECTIONS:
+        return
+
+    sources = cfg.combos if cfg.combos else [None]
+    for combo in sources:
+        min_lon = combo.crop_min_lon if combo and combo.crop_min_lon is not None else cfg.source_crop_min_lon
+        min_lat = combo.crop_min_lat if combo and combo.crop_min_lat is not None else cfg.source_crop_min_lat
+        max_lon = combo.crop_max_lon if combo and combo.crop_max_lon is not None else cfg.source_crop_max_lon
+        max_lat = combo.crop_max_lat if combo and combo.crop_max_lat is not None else cfg.source_crop_max_lat
+        label = f"combos[{combo.name!r}]" if combo else "source_crop_min_lon/min_lat/max_lon/max_lat"
+        if None in (min_lon, min_lat, max_lon, max_lat):
+            raise ValueError(
+                f'output_projection = "{cfg.output_projection}" requires a complete lon/lat crop box '
+                f"(source_crop_min_lon/min_lat/max_lon/max_lat, or a per-combo override) for {label}"
+            )
+
+
+_VALID_PLATFORMS = {"auto", "windows", "kde"}
+
+
+def validate_platform(cfg: Config) -> None:
+    if cfg.platform not in _VALID_PLATFORMS:
+        raise ValueError(f"platform must be one of {sorted(_VALID_PLATFORMS)}, got {cfg.platform!r}")
+
+
 @dataclass(slots=True)
 class EffectiveSource:
     """The fully-resolved satellite/sector/product/resolution/crop for one cycle —
@@ -446,6 +597,10 @@ class EffectiveSource:
     crop_top: float
     crop_right: float
     crop_bottom: float
+    crop_min_lon: float | None
+    crop_min_lat: float | None
+    crop_max_lon: float | None
+    crop_max_lat: float | None
 
     @property
     def image_url(self) -> str:
@@ -482,6 +637,10 @@ def resolve_source(cfg: Config, combo: Combo | None) -> EffectiveSource:
             crop_top=cfg.source_crop_top,
             crop_right=cfg.source_crop_right,
             crop_bottom=cfg.source_crop_bottom,
+            crop_min_lon=cfg.source_crop_min_lon,
+            crop_min_lat=cfg.source_crop_min_lat,
+            crop_max_lon=cfg.source_crop_max_lon,
+            crop_max_lat=cfg.source_crop_max_lat,
         )
     return EffectiveSource(
         name=combo.name,
@@ -494,6 +653,10 @@ def resolve_source(cfg: Config, combo: Combo | None) -> EffectiveSource:
         crop_top=combo.crop_top,
         crop_right=combo.crop_right,
         crop_bottom=combo.crop_bottom,
+        crop_min_lon=combo.crop_min_lon if combo.crop_min_lon is not None else cfg.source_crop_min_lon,
+        crop_min_lat=combo.crop_min_lat if combo.crop_min_lat is not None else cfg.source_crop_min_lat,
+        crop_max_lon=combo.crop_max_lon if combo.crop_max_lon is not None else cfg.source_crop_max_lon,
+        crop_max_lat=combo.crop_max_lat if combo.crop_max_lat is not None else cfg.source_crop_max_lat,
     )
 
 
@@ -543,6 +706,15 @@ def build_session(cfg: Config) -> requests.Session:
     return session
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text to path via a same-directory temp file + os.replace, so a
+    crash/power loss mid-write can never leave a truncated/corrupted file behind --
+    the replace is a single filesystem-level rename, not a partial write in place."""
+    tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    tmp_path.write_text(text)
+    os.replace(tmp_path, path)
+
+
 def load_state(cfg: Config) -> dict[str, Any]:
     if cfg.state_path.exists():
         try:
@@ -553,7 +725,7 @@ def load_state(cfg: Config) -> dict[str, Any]:
 
 
 def save_state(cfg: Config, state: dict[str, Any]) -> None:
-    cfg.state_path.write_text(json.dumps(state, indent=2))
+    _atomic_write_text(cfg.state_path, json.dumps(state, indent=2))
 
 
 def fetch_image(cfg: Config, session: requests.Session, url: str, prev_etag: str | None) -> tuple[bytes, dict[str, str]] | None:
@@ -677,40 +849,58 @@ def crop_to_screen(img: Image.Image, screen_size: tuple[int, int], anchor: float
 
 
 # --------------------------------------------------------------------------- #
-# Georeferenced overlays (CONUS only)
+# Georeferenced overlays (CONUS and Full Disk on the hand-calibrated cdn_jpg path)
 # --------------------------------------------------------------------------- #
 
 # GEOS projection extent (meters) for each satellite's CONUS sector, as served by
 # NOAA STAR's CDN. Derived by loading one real ABI L1b CONUS radiance file per
 # satellite with satpy and reading its area definition — not a resize/crop of the
 # full-disk grid, this is the CONUS sector's own fixed extent (Mesoscale sectors move
-# and can't be hardcoded this way; Full Disk wasn't calibrated). Validated by
-# projecting 10 known city landmarks (5 per satellite) and confirming they land on the
-# correct city/coastline in a real fetched frame.
+# and can't be hardcoded this way). Validated by projecting 10 known city landmarks (5
+# per satellite) and confirming they land on the correct city/coastline in a real
+# fetched frame.
 _GEOS_AREA_CONUS = {
     "GOES18": {"lon_0": -137.0, "extent": (-2505021.61, 1583173.65752, 2505021.61, 4589199.58952)},
     "GOES19": {"lon_0": -75.0, "extent": (-3627271.29128, 1583173.65752, 1382771.92872, 4589199.58952)},
 }
+
+# Full Disk's extent, unlike CONUS, isn't a windowed subset that had to be measured
+# from a real file — it's ABI's entire fixed viewing geometry, which is identical for
+# every GOES-R series satellite regardless of orbital slot (only lon_0 differs by
+# slot). Reused here from satpy's own shipped area definitions
+# (goes_east_abi_f_2km/goes_west_abi_f_2km in satpy/etc/areas.yaml) rather than
+# re-derived, since that's the same constant satpy's GOES ABI L1b reader uses.
+_GEOS_AREA_FULL_DISK = {
+    "GOES18": {"lon_0": -137.0, "extent": (-5434894.885056, -5434894.885056, 5434894.885056, 5434894.885056)},
+    "GOES19": {"lon_0": -75.0, "extent": (-5434894.885056, -5434894.885056, 5434894.885056, 5434894.885056)},
+}
+
+# Per-sector calibration lookup used by the hand-calibrated path (lonlat_to_pixels)
+# — sectors absent here (Mesoscale) have no fixed extent to hardcode and stay
+# unsupported for cdn_jpg; satpy_raw frames instead carry their own real per-frame
+# AreaInfo (see lonlat_to_pixels_area) and aren't limited to this table.
+_GEOS_AREA_BY_SECTOR = {"CONUS": _GEOS_AREA_CONUS, "FD": _GEOS_AREA_FULL_DISK}
 
 # Overlay line widths/marker sizes below are tuned by eye at this frame width, then
 # scaled proportionally for other resolutions (draw_graticule, draw_city_markers) —
 # not a physical/measured constant, just the width the original tuning pass used.
 _OVERLAY_REFERENCE_WIDTH_PX = 2000
 
-_geos_transformers: dict[str, Transformer] = {}
+_geos_transformers: dict[float, Transformer] = {}
 
 
-def _geos_transformer(satellite: str) -> Transformer | None:
-    info = _GEOS_AREA_CONUS.get(satellite)
-    if info is None:
-        return None
-    if satellite not in _geos_transformers:
+def _geos_transformer(lon_0: float) -> Transformer:
+    """Cached by lon_0 alone (not satellite/sector) since every GEOS transform used
+    here shares the same h/ellps/sweep and only the sub-satellite longitude differs
+    between satellites — CONUS and Full Disk calibrations for the same satellite
+    share one transformer, just with a different extent applied afterward."""
+    if lon_0 not in _geos_transformers:
         crs = CRS.from_dict({
-            "proj": "geos", "sweep": "x", "lon_0": info["lon_0"], "h": 35786023,
+            "proj": "geos", "sweep": "x", "lon_0": lon_0, "h": 35786023,
             "x_0": 0, "y_0": 0, "ellps": "GRS80", "units": "m",
         })
-        _geos_transformers[satellite] = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
-    return _geos_transformers[satellite]
+        _geos_transformers[lon_0] = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+    return _geos_transformers[lon_0]
 
 
 def _project_to_pixels(
@@ -718,9 +908,10 @@ def _project_to_pixels(
     lons: np.ndarray, lats: np.ndarray, img_w: int, img_h: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Shared linear fraction-of-extent -> pixel math, used by both lonlat_to_pixels
-    (CONUS-only, _GEOS_AREA_CONUS lookup) and lonlat_to_pixels_area (any sector, real
-    AreaDefinition from a satpy_raw frame) -- projection-agnostic as long as the
-    source raster is a rectilinear GEOS-projected grid, which holds for both."""
+    (hand-calibrated CONUS/Full Disk, _GEOS_AREA_BY_SECTOR lookup) and
+    lonlat_to_pixels_area (any sector, real AreaDefinition from a satpy_raw frame) --
+    projection-agnostic as long as the source raster is a rectilinear GEOS-projected
+    grid, which holds for both."""
     x, y = transformer.transform(lons, lats)
     x0, y0, x1, y1 = extent
     col = (x - x0) / (x1 - x0) * img_w
@@ -729,25 +920,26 @@ def _project_to_pixels(
 
 
 def lonlat_to_pixels(
-    satellite: str, lons: np.ndarray, lats: np.ndarray, img_w: int, img_h: int
+    satellite: str, lons: np.ndarray, lats: np.ndarray, img_w: int, img_h: int, sector: str = "CONUS"
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    """Vectorized lon/lat -> (col, row) in a CONUS frame at img_w x img_h, for
+    """Vectorized lon/lat -> (col, row) in a `sector` frame at img_w x img_h, for
     whichever resolution tier was actually fetched (fraction-of-extent based, not
-    tied to a specific pixel count). Returns None for satellites without CONUS
-    calibration data (see _GEOS_AREA_CONUS)."""
-    t = _geos_transformer(satellite)
-    if t is None:
+    tied to a specific pixel count). Returns None for a sector/satellite combination
+    without hardcoded calibration data (see _GEOS_AREA_BY_SECTOR)."""
+    info = _GEOS_AREA_BY_SECTOR.get(sector, {}).get(satellite)
+    if info is None:
         return None
-    return _project_to_pixels(t, _GEOS_AREA_CONUS[satellite]["extent"], lons, lats, img_w, img_h)
+    return _project_to_pixels(_geos_transformer(info["lon_0"]), info["extent"], lons, lats, img_w, img_h)
 
 
 @dataclass(slots=True)
 class AreaInfo:
     """Real georeferencing for one fetched frame, as reported by satpy's own
-    AreaDefinition -- the satpy_raw-path equivalent of a _GEOS_AREA_CONUS lookup,
-    but valid for any sector (Full Disk, Mesoscale), not just the two hand-calibrated
-    CONUS extents. Populated on FetchedFrame once a satpy_raw frame is actually
-    loaded; unknown before then, so it lives on the frame, not on EffectiveSource."""
+    AreaDefinition -- the satpy_raw-path equivalent of a _GEOS_AREA_BY_SECTOR lookup,
+    but valid for any sector (including Mesoscale), not just the two hand-calibrated
+    CONUS/Full Disk extents. Populated on FetchedFrame once a satpy_raw frame is
+    actually loaded; unknown before then, so it lives on the frame, not on
+    EffectiveSource."""
     proj4_params: dict[str, Any]
     extent: tuple[float, float, float, float]
 
@@ -755,26 +947,214 @@ class AreaInfo:
 _area_info_transformers: dict[tuple[float, ...], Transformer] = {}
 
 
-def lonlat_to_pixels_area(
-    area: AreaInfo, lons: np.ndarray, lats: np.ndarray, img_w: int, img_h: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """Same math as lonlat_to_pixels, but sourced from a real AreaDefinition (any
-    sector) instead of the CONUS-only _GEOS_AREA_CONUS[satellite] lookup."""
+def _area_transformer(area: AreaInfo) -> Transformer:
+    """Cached forward (EPSG:4326 -> the area's own CRS) transformer for one real
+    per-frame AreaInfo, keyed on its proj4 params."""
     cache_key = tuple(sorted(area.proj4_params.items()))
     if cache_key not in _area_info_transformers:
         crs = CRS.from_dict(area.proj4_params)
         _area_info_transformers[cache_key] = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
-    return _project_to_pixels(_area_info_transformers[cache_key], area.extent, lons, lats, img_w, img_h)
+    return _area_info_transformers[cache_key]
+
+
+def lonlat_to_pixels_area(
+    area: AreaInfo, lons: np.ndarray, lats: np.ndarray, img_w: int, img_h: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Same math as lonlat_to_pixels, but sourced from a real AreaDefinition (any
+    sector) instead of the hand-calibrated _GEOS_AREA_BY_SECTOR[sector][satellite]
+    lookup."""
+    return _project_to_pixels(_area_transformer(area), area.extent, lons, lats, img_w, img_h)
+
+
+def _resolve_source_projection(
+    satellite: str, sector: str, area: AreaInfo | None,
+) -> tuple[Transformer, tuple[float, float, float, float]] | None:
+    """Resolve (forward EPSG:4326->source-CRS transformer, source extent) for a
+    frame -- the real per-frame `area` when given (satpy_raw, any sector), otherwise
+    the hand-calibrated CONUS/Full Disk lookup (cdn_jpg). Returns None if there's no
+    calibration for this satellite/sector combination. Used by reproject_frame, which
+    (unlike lonlat_to_pixels/lonlat_to_pixels_area) needs the transformer/extent pair
+    itself rather than just a projected result."""
+    if area is not None:
+        return _area_transformer(area), area.extent
+    info = _GEOS_AREA_BY_SECTOR.get(sector, {}).get(satellite)
+    if info is None:
+        return None
+    return _geos_transformer(info["lon_0"]), info["extent"]
+
+
+def _satellite_lon_0(satellite: str, sector: str, area: AreaInfo | None) -> float | None:
+    """The sub-satellite longitude for a frame -- used as output_projection's default
+    orthographic center when output_projection_center_lon isn't set. None if there's
+    no calibration/real projection info to read it from."""
+    if area is not None:
+        return area.proj4_params.get("lon_0")
+    info = _GEOS_AREA_BY_SECTOR.get(sector, {}).get(satellite)
+    return info["lon_0"] if info else None
+
+
+def lonlat_box_to_crop_fraction(
+    satellite: str, sector: str, area: AreaInfo | None, img_w: int, img_h: int,
+    min_lon: float, min_lat: float, max_lon: float, max_lat: float,
+) -> tuple[float, float, float, float] | None:
+    """Convert a lon/lat bounding box to a (left, top, right, bottom) pixel-fraction
+    crop box, using the same calibration draw_overlays uses: the real per-frame `area`
+    when given (satpy_raw, any sector), otherwise the hand-calibrated CONUS/Full Disk
+    lookup for `satellite`/`sector` (cdn_jpg). Returns None (crop should be skipped --
+    caller falls back to a fractional crop) if there's no calibration for this
+    satellite/sector combination.
+
+    Projects all 4 corners of the box, not just min/max lon/lat independently -- GEOS
+    projection is nonlinear, so a lon/lat rectangle doesn't generally map to an
+    axis-aligned pixel rectangle. The bounding box of the 4 projected corners is the
+    closest rectangular approximation, which is what crop_fractional needs; for a
+    CONUS-sized box the curvature is negligible (same order as the sub-pixel median
+    error the CONUS calibration itself was validated to), but a very large box (e.g.
+    most of a Full Disk sector) will see this approximation include a bit more margin
+    than the exact (curved) region would."""
+    lons = np.array([min_lon, max_lon, max_lon, min_lon])
+    lats = np.array([min_lat, min_lat, max_lat, max_lat])
+    if area is not None:
+        result = lonlat_to_pixels_area(area, lons, lats, img_w, img_h)
+    else:
+        result = lonlat_to_pixels(satellite, lons, lats, img_w, img_h, sector)
+    if result is None:
+        return None
+    cols, rows = result
+    if not (np.all(np.isfinite(cols)) and np.all(np.isfinite(rows))):
+        return None
+    left = float(np.min(cols)) / img_w
+    right = float(np.max(cols)) / img_w
+    top = float(np.min(rows)) / img_h
+    bottom = float(np.max(rows)) / img_h
+    return (
+        max(0.0, min(1.0, left)), max(0.0, min(1.0, top)),
+        max(0.0, min(1.0, right)), max(0.0, min(1.0, bottom)),
+    )
+
+
+# GRS80 semi-major axis (meters) -- same ellipsoid used throughout this module's GEOS
+# calibration, and the natural "radius of the visible disk" for an orthographic view
+# centered on a point at infinity (true orthographic, not perspective-from-GEOS-orbit).
+_GRS80_SEMI_MAJOR_AXIS_M = 6378137.0
+
+
+def _bounds_projected_extent(
+    dst_crs: CRS, min_lon: float, min_lat: float, max_lon: float, max_lat: float, n: int = 25,
+) -> tuple[float, float, float, float]:
+    """The (x0, y0, x1, y1) extent a lon/lat box covers once projected into dst_crs.
+    Samples an n x n grid across the whole box rather than just its 4 corners --
+    conic/azimuthal projections curve parallels/meridians, so e.g. a box's bottom edge
+    can bulge further out in projected y than either of its bottom corners do (verified
+    empirically for lambertconformal: the bottom-edge midpoint's y was ~10% beyond the
+    bottom corners' own y). Cheap: n=25 is 625 points, a single vectorized transform
+    call."""
+    lons, lats = np.meshgrid(np.linspace(min_lon, max_lon, n), np.linspace(min_lat, max_lat, n))
+    transformer = Transformer.from_crs("EPSG:4326", dst_crs, always_xy=True)
+    x, y = transformer.transform(lons, lats)
+    return float(np.nanmin(x)), float(np.nanmin(y)), float(np.nanmax(x)), float(np.nanmax(y))
+
+
+def reproject_frame(
+    img: Image.Image, satellite: str, sector: str, area: AreaInfo | None,
+    projection: str, bounds: tuple[float, float, float, float] | None,
+    center_lon: float, center_lat: float, out_w: int, out_h: int,
+    lcc_lat1: float | None = None, lcc_lat2: float | None = None,
+) -> Image.Image | None:
+    """Reproject img (drawn in its native GEOS pixel grid -- must run after
+    draw_overlays/trim_source_caption, before any further crop/resize) into a
+    different map projection via nearest-neighbor resampling. Pure pyproj + numpy, no
+    pyresample/satpy dependency, so this works identically for cdn_jpg's
+    hand-calibrated CONUS/Full Disk grid and satpy_raw's real per-frame AreaInfo.
+    Returns None (reprojection skipped, caller falls back to the native-projection
+    pipeline) if there's no calibration for this satellite/sector combination.
+
+    Bounds-framed (`bounds` = min_lon, min_lat, max_lon, max_lat -- required, becomes
+    the output's extent):
+    `projection = "platecarree"`: equirectangular.
+    `projection = "lambertconformal"`: conformal conic, standard parallels `lcc_lat1`/
+    `lcc_lat2` (default: 1/6 and 5/6 up the box's latitude range if not given).
+
+    Center-framed (`center_lon`/`center_lat, `bounds` unused):
+    `projection = "orthographic"`: a globe view as seen from space; pixels beyond the
+    visible hemisphere (non-finite after the inverse transform) render black -- this
+    is "space", not a bug.
+    `projection = "lambertazimuthal"`: equal-area azimuthal, valid out to (not
+    including) the antipode -- shows nearly the whole globe rather than just the
+    visible hemisphere."""
+    resolved = _resolve_source_projection(satellite, sector, area)
+    if resolved is None:
+        return None
+    src_transformer, src_extent = resolved
+    src_w, src_h = img.size
+
+    if projection == "platecarree":
+        min_lon, min_lat, max_lon, max_lat = bounds
+        dst_lons = np.linspace(min_lon, max_lon, out_w)
+        dst_lats = np.linspace(max_lat, min_lat, out_h)  # row 0 = north (max_lat)
+        lon_grid, lat_grid = np.meshgrid(dst_lons, dst_lats)
+    elif projection == "lambertconformal":
+        min_lon, min_lat, max_lon, max_lat = bounds
+        lon_0, lat_0 = (min_lon + max_lon) / 2, (min_lat + max_lat) / 2
+        span = max_lat - min_lat
+        lat_1 = lcc_lat1 if lcc_lat1 is not None else min_lat + span / 6
+        lat_2 = lcc_lat2 if lcc_lat2 is not None else max_lat - span / 6
+        lcc_crs = CRS.from_dict({
+            "proj": "lcc", "lon_0": lon_0, "lat_0": lat_0, "lat_1": lat_1, "lat_2": lat_2, "ellps": "GRS80",
+        })
+        x0, y0, x1, y1 = _bounds_projected_extent(lcc_crs, min_lon, min_lat, max_lon, max_lat)
+        xs = np.linspace(x0, x1, out_w)
+        ys = np.linspace(y1, y0, out_h)  # row 0 = north (max y)
+        x_grid, y_grid = np.meshgrid(xs, ys)
+        inverse = Transformer.from_crs(lcc_crs, "EPSG:4326", always_xy=True)
+        with np.errstate(invalid="ignore"):
+            lon_grid, lat_grid = inverse.transform(x_grid, y_grid)
+    elif projection == "orthographic":
+        ortho_crs = CRS.from_dict({"proj": "ortho", "lon_0": center_lon, "lat_0": center_lat, "ellps": "GRS80"})
+        inverse = Transformer.from_crs(ortho_crs, "EPSG:4326", always_xy=True)
+        r = _GRS80_SEMI_MAJOR_AXIS_M
+        xs = np.linspace(-r, r, out_w)
+        ys = np.linspace(r, -r, out_h)  # row 0 = top (+r)
+        x_grid, y_grid = np.meshgrid(xs, ys)
+        with np.errstate(invalid="ignore"):
+            lon_grid, lat_grid = inverse.transform(x_grid, y_grid)
+    elif projection == "lambertazimuthal":
+        laea_crs = CRS.from_dict({"proj": "laea", "lon_0": center_lon, "lat_0": center_lat, "ellps": "GRS80"})
+        inverse = Transformer.from_crs(laea_crs, "EPSG:4326", always_xy=True)
+        r = 2 * _GRS80_SEMI_MAJOR_AXIS_M  # valid up to (not including) the antipode
+        xs = np.linspace(-r, r, out_w)
+        ys = np.linspace(r, -r, out_h)  # row 0 = top (+r)
+        x_grid, y_grid = np.meshgrid(xs, ys)
+        with np.errstate(invalid="ignore"):
+            lon_grid, lat_grid = inverse.transform(x_grid, y_grid)
+    else:
+        raise ValueError(f"reproject_frame: unknown projection {projection!r}")
+
+    with np.errstate(invalid="ignore"):
+        src_col, src_row = _project_to_pixels(src_transformer, src_extent, lon_grid, lat_grid, src_w, src_h)
+
+    valid = (
+        np.isfinite(src_col) & np.isfinite(src_row)
+        & (src_col >= 0) & (src_col < src_w) & (src_row >= 0) & (src_row < src_h)
+    )
+    col_idx = np.where(valid, src_col, 0).astype(np.intp)
+    row_idx = np.where(valid, src_row, 0).astype(np.intp)
+
+    src_array = np.asarray(img.convert("RGB"))
+    out_array = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+    out_array[valid] = src_array[row_idx[valid], col_idx[valid]]
+    return Image.fromarray(out_array, mode="RGB")
 
 
 def draw_graticule(
     img: Image.Image, satellite: str, step_deg: float, color: tuple[int, int, int], opacity: int,
-    area: AreaInfo | None = None,
+    area: AreaInfo | None = None, sector: str = "CONUS",
 ) -> Image.Image:
     """Draw a lat/lon grid on img (must be the raw, untrimmed/uncropped frame — see
     the pipeline-order note on overlay_* config fields). Uses the real per-frame
     `area` (any sector) when given, e.g. from a satpy_raw fetch; otherwise falls back
-    to the CONUS-only _GEOS_AREA_CONUS lookup keyed by `satellite`."""
+    to the hand-calibrated `sector` lookup (see _GEOS_AREA_BY_SECTOR) keyed by
+    `satellite`."""
     w, h = img.size
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -784,7 +1164,7 @@ def draw_graticule(
     def project(lons: np.ndarray, lats: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
         if area is not None:
             return lonlat_to_pixels_area(area, lons, lats, w, h)
-        return lonlat_to_pixels(satellite, lons, lats, w, h)
+        return lonlat_to_pixels(satellite, lons, lats, w, h, sector)
 
     def draw_run(cols: np.ndarray, rows: np.ndarray) -> None:
         run: list[tuple[float, float]] = []
@@ -816,7 +1196,7 @@ def draw_graticule(
 
 def draw_city_markers(
     img: Image.Image, satellite: str, cities: tuple[CityMarker, ...], cfg: Config,
-    area: AreaInfo | None = None,
+    area: AreaInfo | None = None, sector: str = "CONUS",
 ) -> Image.Image:
     """Draw labeled markers at each city's projected pixel position. Same
     raw-frame-only requirement and area-lookup fallback as draw_graticule."""
@@ -825,7 +1205,7 @@ def draw_city_markers(
     w, h = img.size
     lons = np.array([c.lon for c in cities])
     lats = np.array([c.lat for c in cities])
-    result = lonlat_to_pixels_area(area, lons, lats, w, h) if area is not None else lonlat_to_pixels(satellite, lons, lats, w, h)
+    result = lonlat_to_pixels_area(area, lons, lats, w, h) if area is not None else lonlat_to_pixels(satellite, lons, lats, w, h, sector)
     if result is None:
         return img
     cols, rows = result
@@ -908,7 +1288,7 @@ def _resolve_feature_color(prop_color: Any, default: tuple[int, int, int]) -> tu
 
 def _draw_lonlat_run(
     draw: ImageDraw.ImageDraw, satellite: str, coords: list[list[float]], w: int, h: int,
-    fill: tuple[int, ...], width: int, close: bool = False,
+    fill: tuple[int, ...], width: int, close: bool = False, sector: str = "CONUS",
 ) -> None:
     """Project a line/ring of [lon, lat] pairs and draw it, breaking the line
     wherever a point falls outside the frame (same run-breaking approach as
@@ -919,7 +1299,7 @@ def _draw_lonlat_run(
         coords = [*coords, coords[0]]
     lons = np.array([c[0] for c in coords])
     lats = np.array([c[1] for c in coords])
-    result = lonlat_to_pixels(satellite, lons, lats, w, h)
+    result = lonlat_to_pixels(satellite, lons, lats, w, h, sector)
     if result is None:
         return
     cols, rows = result
@@ -938,7 +1318,7 @@ def _draw_lonlat_run(
 def _build_geojson_layer(
     satellite: str, features: list[dict[str, Any]], w: int, h: int,
     color: tuple[int, int, int], line_width: int, marker_radius: int, opacity: int,
-    font_path: str = "", font_size: int = 14,
+    font_path: str = "", font_size: int = 14, sector: str = "CONUS",
 ) -> Image.Image:
     """Project + draw Point/MultiPoint/LineString/MultiLineString/Polygon/
     MultiPolygon features onto a fresh (w, h) transparent RGBA layer. Per-feature
@@ -956,7 +1336,7 @@ def _build_geojson_layer(
 
     def draw_point(lon: float, lat: float, fill: tuple[int, ...], label: str | None) -> None:
         nonlocal font
-        result = lonlat_to_pixels(satellite, np.array([lon]), np.array([lat]), w, h)
+        result = lonlat_to_pixels(satellite, np.array([lon]), np.array([lat]), w, h, sector)
         if result is None:
             return
         c, r = result[0][0], result[1][0]
@@ -987,17 +1367,17 @@ def _build_geojson_layer(
             for lon, lat in coords:
                 draw_point(lon, lat, fill, label)
         elif gtype == "LineString":
-            _draw_lonlat_run(draw, satellite, coords, w, h, fill, width)
+            _draw_lonlat_run(draw, satellite, coords, w, h, fill, width, sector=sector)
         elif gtype == "MultiLineString":
             for line in coords:
-                _draw_lonlat_run(draw, satellite, line, w, h, fill, width)
+                _draw_lonlat_run(draw, satellite, line, w, h, fill, width, sector=sector)
         elif gtype == "Polygon":
             for ring in coords:
-                _draw_lonlat_run(draw, satellite, ring, w, h, fill, width, close=True)
+                _draw_lonlat_run(draw, satellite, ring, w, h, fill, width, close=True, sector=sector)
         elif gtype == "MultiPolygon":
             for polygon in coords:
                 for ring in polygon:
-                    _draw_lonlat_run(draw, satellite, ring, w, h, fill, width, close=True)
+                    _draw_lonlat_run(draw, satellite, ring, w, h, fill, width, close=True, sector=sector)
 
     return overlay
 
@@ -1005,7 +1385,7 @@ def _build_geojson_layer(
 def draw_geojson_overlay(
     img: Image.Image, satellite: str, geojson: dict[str, Any],
     color: tuple[int, int, int], line_width: int, marker_radius: int, opacity: int,
-    font_path: str = "", font_size: int = 14,
+    font_path: str = "", font_size: int = 14, sector: str = "CONUS",
 ) -> Image.Image:
     """Draw whatever Point/MultiPoint/LineString/MultiLineString/Polygon/MultiPolygon
     features a GeoJSON payload contains, projected via lonlat_to_pixels. Per-feature
@@ -1016,7 +1396,7 @@ def draw_geojson_overlay(
     if not features:
         return img
     w, h = img.size
-    layer = _build_geojson_layer(satellite, features, w, h, color, line_width, marker_radius, opacity, font_path, font_size)
+    layer = _build_geojson_layer(satellite, features, w, h, color, line_width, marker_radius, opacity, font_path, font_size, sector)
     base = img.convert("RGBA")
     base.alpha_composite(layer)
     return base.convert("RGB")
@@ -1025,7 +1405,7 @@ def draw_geojson_overlay(
 def _geojson_files_cache_key(
     paths: tuple[str, ...], satellite: str, w: int, h: int,
     color: tuple[int, int, int], line_width: int, marker_radius: int, opacity: int,
-    font_path: str, font_size: int,
+    font_path: str, font_size: int, sector: str,
 ) -> dict[str, Any]:
     """Identifies exactly the inputs that affect the rendered layer -- if any of
     these change, the cached PNG is stale and must be rebuilt. mtime (not content
@@ -1038,7 +1418,7 @@ def _geojson_files_cache_key(
             mtime = None
         file_stats.append([p, mtime])
     return {
-        "files": file_stats, "satellite": satellite, "w": w, "h": h,
+        "files": file_stats, "satellite": satellite, "sector": sector, "w": w, "h": h,
         "color": list(color), "line_width": line_width, "marker_radius": marker_radius, "opacity": opacity,
         "font_path": font_path, "font_size": font_size,
     }
@@ -1047,20 +1427,21 @@ def _geojson_files_cache_key(
 def _geojson_files_cache_id(
     paths: tuple[str, ...], satellite: str, w: int, h: int,
     color: tuple[int, int, int], line_width: int, marker_radius: int, opacity: int,
-    font_path: str, font_size: int,
+    font_path: str, font_size: int, sector: str,
 ) -> str:
-    """A short, stable identifier for one distinct (files, satellite, frame size,
-    style) combination, used to give each such combination its own cache file. Without
-    this, every combo/satellite/resolution sharing overlay_geojson_files would fight
-    over one fixed filename: rendering combo B would invalidate and overwrite combo
-    A's cached layer (their cache *keys* differ), so alternating between them in
-    "rotate"/"per_monitor" mode would rebuild on every single cycle -- never actually
-    caching anything (see NEXT_STEPS.md item 16 for the related per-combo-overlay
-    gap this compounds). Deliberately excludes each file's mtime -- that still lives
-    in the cache metadata and is checked separately, so editing a file invalidates the
-    existing entry for this identity rather than minting a new cache file."""
+    """A short, stable identifier for one distinct (files, satellite, sector, frame
+    size, style) combination, used to give each such combination its own cache file.
+    Without this, every combo/satellite/resolution/sector sharing overlay_geojson_files
+    would fight over one fixed filename: rendering combo B would invalidate and
+    overwrite combo A's cached layer (their cache *keys* differ), so alternating
+    between them in "rotate"/"per_monitor" mode would rebuild on every single cycle --
+    never actually caching anything (see NEXT_STEPS.md item 16 for the related
+    per-combo-overlay gap this compounds). Deliberately excludes each file's mtime --
+    that still lives in the cache metadata and is checked separately, so editing a
+    file invalidates the existing entry for this identity rather than minting a new
+    cache file."""
     identity = {
-        "paths": list(paths), "satellite": satellite, "w": w, "h": h,
+        "paths": list(paths), "satellite": satellite, "sector": sector, "w": w, "h": h,
         "color": list(color), "line_width": line_width, "marker_radius": marker_radius,
         "opacity": opacity, "font_path": font_path, "font_size": font_size,
     }
@@ -1084,13 +1465,13 @@ def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: Effecti
         cfg.overlay_geojson_files, source.satellite, w, h,
         cfg.overlay_geojson_color, cfg.overlay_geojson_line_width,
         cfg.overlay_geojson_marker_radius, cfg.overlay_geojson_opacity,
-        cfg.info_font_path, cfg.overlay_geojson_font_size,
+        cfg.info_font_path, cfg.overlay_geojson_font_size, source.sector,
     )
     cache_id = _geojson_files_cache_id(
         cfg.overlay_geojson_files, source.satellite, w, h,
         cfg.overlay_geojson_color, cfg.overlay_geojson_line_width,
         cfg.overlay_geojson_marker_radius, cfg.overlay_geojson_opacity,
-        cfg.info_font_path, cfg.overlay_geojson_font_size,
+        cfg.info_font_path, cfg.overlay_geojson_font_size, source.sector,
     )
     cache_png = cfg.data_dir / f"overlay_geojson_cache_{cache_id}.png"
     cache_meta = cfg.data_dir / f"overlay_geojson_cache_{cache_id}.json"
@@ -1118,12 +1499,12 @@ def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: Effecti
             source.satellite, features, w, h,
             cfg.overlay_geojson_color, cfg.overlay_geojson_line_width,
             cfg.overlay_geojson_marker_radius, cfg.overlay_geojson_opacity,
-            cfg.info_font_path, cfg.overlay_geojson_font_size,
+            cfg.info_font_path, cfg.overlay_geojson_font_size, source.sector,
         )
         try:
             cfg.data_dir.mkdir(parents=True, exist_ok=True)
             layer.save(cache_png)
-            cache_meta.write_text(json.dumps(key))
+            _atomic_write_text(cache_meta, json.dumps(key))
         except OSError as e:
             logging.warning("Couldn't write overlay_geojson_files cache: %s", e)
 
@@ -1139,34 +1520,33 @@ def draw_overlays(img: Image.Image, cfg: Config, source: EffectiveSource, area: 
 
     `area` is real per-frame georeferencing (only available for satpy_raw frames,
     see FetchedFrame.area_info) -- when given, it's valid for any sector, and the
-    CONUS-only/_GEOS_AREA_CONUS-allowlist gate below doesn't apply to
+    hand-calibrated/_GEOS_AREA_BY_SECTOR-allowlist gate below doesn't apply to
     overlay_graticule/overlay_cities (see draw_graticule/draw_city_markers, which
-    both take `area` too). Without it (the cdn_jpg path, which has no
-    georeferencing of its own), those two fall back to the hand-calibrated
-    CONUS-only lookup and its gate. overlay_shell_command/overlay_geojson_files
-    aren't area-aware yet -- they call lonlat_to_pixels(satellite, ...) directly
-    (see _draw_lonlat_run/_build_geojson_layer), so they stay CONUS-only regardless
-    of `area` and silently draw nothing on an unsupported sector/satellite rather
-    than erroring."""
+    both take `area` too). Without it (the cdn_jpg path, which has no georeferencing
+    of its own), all four overlay kinds fall back to the hand-calibrated per-sector
+    lookup (CONUS and Full Disk; Mesoscale has no fixed extent to hardcode) and its
+    gate, keyed on `source.sector` -- see _GEOS_AREA_BY_SECTOR."""
     if not (cfg.overlay_graticule or cfg.overlay_cities or cfg.overlay_shell_command or cfg.overlay_geojson_files):
         return img
     if area is None:
-        if source.sector != "CONUS":
+        calibration = _GEOS_AREA_BY_SECTOR.get(source.sector)
+        if calibration is None:
             logging.warning(
-                "[%s] Georeferenced overlays are only calibrated for CONUS (sector=%s); skipping",
-                source.name, source.sector,
+                "[%s] Georeferenced overlays are only calibrated for %s (sector=%s); skipping",
+                source.name, "/".join(_GEOS_AREA_BY_SECTOR), source.sector,
             )
             return img
-        if source.satellite not in _GEOS_AREA_CONUS:
+        if source.satellite not in calibration:
             logging.warning(
-                "[%s] No overlay calibration for satellite=%s; skipping", source.name, source.satellite,
+                "[%s] No %s overlay calibration for satellite=%s; skipping",
+                source.name, source.sector, source.satellite,
             )
             return img
 
     if cfg.overlay_graticule:
-        img = draw_graticule(img, source.satellite, cfg.overlay_graticule_step_deg, cfg.overlay_graticule_color, cfg.overlay_graticule_opacity, area)
+        img = draw_graticule(img, source.satellite, cfg.overlay_graticule_step_deg, cfg.overlay_graticule_color, cfg.overlay_graticule_opacity, area, source.sector)
     if cfg.overlay_cities:
-        img = draw_city_markers(img, source.satellite, cfg.overlay_cities, cfg, area)
+        img = draw_city_markers(img, source.satellite, cfg.overlay_cities, cfg, area, source.sector)
     if cfg.overlay_geojson_files:
         try:
             img = render_static_geojson_overlay(img, cfg, source)
@@ -1182,7 +1562,7 @@ def draw_overlays(img: Image.Image, cfg: Config, source: EffectiveSource, area: 
                     img, source.satellite, geojson,
                     cfg.overlay_shell_color, cfg.overlay_shell_line_width,
                     cfg.overlay_shell_marker_radius, cfg.overlay_shell_opacity,
-                    cfg.info_font_path, cfg.overlay_shell_font_size,
+                    cfg.info_font_path, cfg.overlay_shell_font_size, source.sector,
                 )
             except Exception:
                 logging.exception(
@@ -1264,6 +1644,29 @@ def embed_exif(img: Image.Image, meta: dict[str, Any]) -> Image.Image:
 # with padding (see font_size/pad below, which derive from bar_height).
 _INFO_BAR_MIN_HEIGHT_PX = 28
 
+# Floor for the shrink-to-fit loop below -- stop shrinking once the font would become
+# illegible rather than chasing an exact fit for pathologically long text.
+_INFO_BAR_MIN_FONT_PX = 10
+
+
+def _fit_info_bar_font(draw: ImageDraw.ImageDraw, left_text: str, right_text: str, font_path: str, font_size: int, available_width: int, pad: int) -> ImageFont.FreeTypeFont:
+    """Pick the largest font size (down to _INFO_BAR_MIN_FONT_PX) at which left_text and
+    right_text, drawn left- and right-aligned with `pad` on each end and between them,
+    don't overlap. A long product label (e.g. satpy_raw's "GeoColor (satpy_raw)") on a
+    square Full Disk frame can outrun the bar width at the nominal size otherwise."""
+    try:
+        font = ImageFont.truetype(font_path, font_size)
+    except OSError:
+        return ImageFont.load_default()
+
+    while font_size > _INFO_BAR_MIN_FONT_PX and draw.textlength(left_text, font=font) + draw.textlength(right_text, font=font) + 3 * pad > available_width:
+        font_size = round(font_size * 0.9)
+        try:
+            font = ImageFont.truetype(font_path, font_size)
+        except OSError:
+            return ImageFont.load_default()
+    return font
+
 
 def draw_info_block(img: Image.Image, cfg: Config, meta: dict[str, Any], platform: WallpaperPlatform) -> Image.Image:
     img = img.convert("RGB")
@@ -1274,12 +1677,6 @@ def draw_info_block(img: Image.Image, cfg: Config, meta: dict[str, Any], platfor
     overlay = Image.new("RGBA", (width, bar_height), (0, 0, 0, cfg.info_block_opacity))
     draw = ImageDraw.Draw(overlay)
 
-    try:
-        font_size = max(12, round(bar_height * 0.42))
-        font = ImageFont.truetype(cfg.info_font_path, font_size)
-    except OSError:
-        font = ImageFont.load_default()
-
     capture_local = "unknown"
     if meta["capture_time_utc"]:
         dt_utc = datetime.fromisoformat(meta["capture_time_utc"])
@@ -1289,6 +1686,9 @@ def draw_info_block(img: Image.Image, cfg: Config, meta: dict[str, Any], platfor
     right_text = f"Captured {capture_local}"
 
     pad = round(bar_height * 0.25)
+    font_size = max(12, round(bar_height * 0.42))
+    font = _fit_info_bar_font(draw, left_text, right_text, cfg.info_font_path, font_size, width, pad)
+
     draw.text((pad, bar_height // 2), left_text, font=font, fill=(255, 255, 255, 255), anchor="lm")
     draw.text((width - pad, bar_height // 2), right_text, font=font, fill=(255, 255, 255, 255), anchor="rm")
 
@@ -1505,7 +1905,56 @@ def fetch_and_render(
         if source.source_kind == "cdn_jpg" and cfg.trim_source_caption:
             img = trim_source_caption(img, cfg.trim_source_caption_frac)
 
-        img = crop_fractional(img, source.crop_left, source.crop_top, source.crop_right, source.crop_bottom)
+        did_reproject = False
+        if cfg.output_projection != "native":
+            center_lon = cfg.output_projection_center_lon
+            if center_lon is None:
+                center_lon = _satellite_lon_0(source.satellite, source.sector, frame.area_info) or 0.0
+            center_lat = cfg.output_projection_center_lat if cfg.output_projection_center_lat is not None else 0.0
+            out_w = img.width
+            if cfg.output_projection in _BOUNDS_FRAMED_PROJECTIONS:
+                bounds = (source.crop_min_lon, source.crop_min_lat, source.crop_max_lon, source.crop_max_lat)
+                # A degrees-based aspect ratio approximation -- exact for platecarree,
+                # only approximate for lambertconformal's actual projected aspect, but
+                # close enough for a CONUS-sized box, and crop_to_screen's cover-crop
+                # corrects the final aspect to the real screen anyway.
+                lon_span, lat_span = bounds[2] - bounds[0], bounds[3] - bounds[1]
+                out_h = max(1, round(out_w * lat_span / lon_span)) if lon_span else img.height
+            else:  # "orthographic"/"lambertazimuthal" -- square canvas, globe isn't an ellipse
+                bounds = None
+                out_h = out_w
+
+            reprojected = reproject_frame(
+                img, source.satellite, source.sector, frame.area_info,
+                cfg.output_projection, bounds, center_lon, center_lat, out_w, out_h,
+                cfg.output_projection_lcc_lat1, cfg.output_projection_lcc_lat2,
+            )
+            if reprojected is not None:
+                img = reprojected
+                did_reproject = True
+            else:
+                logging.warning(
+                    "[%s] No calibration for satellite=%s sector=%s; output_projection skipped, "
+                    "using the native projection", source.name, source.satellite, source.sector,
+                )
+
+        if not did_reproject:
+            # The reprojection's own bounds/framing already is the crop when it ran --
+            # only apply the region-of-interest crop on top of the native projection.
+            crop_box = (source.crop_left, source.crop_top, source.crop_right, source.crop_bottom)
+            if source.crop_min_lon is not None:
+                lonlat_box = lonlat_box_to_crop_fraction(
+                    source.satellite, source.sector, frame.area_info, *img.size,
+                    source.crop_min_lon, source.crop_min_lat, source.crop_max_lon, source.crop_max_lat,
+                )
+                if lonlat_box is not None:
+                    crop_box = lonlat_box
+                else:
+                    logging.warning(
+                        "[%s] No calibration for satellite=%s sector=%s; falling back to the fractional crop",
+                        source.name, source.satellite, source.sector,
+                    )
+            img = crop_fractional(img, *crop_box)
 
         if cfg.crop_to_screen:
             img = crop_to_screen(img, screen_size, cfg.crop_anchor)
@@ -1558,7 +2007,7 @@ def run_once(cfg: Config, session: requests.Session, platform: WallpaperPlatform
 
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     img.save(cfg.wallpaper_path, "JPEG", quality=92, exif=img.info.get("exif", b""))
-    cfg.metadata_path.write_text(json.dumps(meta, indent=2))
+    _atomic_write_text(cfg.metadata_path, json.dumps(meta, indent=2))
     logging.info("Saved wallpaper + metadata to %s", cfg.data_dir)
 
     if cfg.render_to:
@@ -1597,7 +2046,7 @@ def run_once_rotate(cfg: Config, session: requests.Session, platform: WallpaperP
 
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     img.save(cfg.wallpaper_path, "JPEG", quality=92, exif=img.info.get("exif", b""))
-    cfg.metadata_path.write_text(json.dumps(meta, indent=2))
+    _atomic_write_text(cfg.metadata_path, json.dumps(meta, indent=2))
     logging.info("[%s] Saved wallpaper + metadata to %s", combo.name, cfg.data_dir)
 
     if cfg.render_to:
@@ -1644,7 +2093,7 @@ def run_once_per_monitor(cfg: Config, session: requests.Session, platform: Wallp
 
         out_path = cfg.data_dir / f"wallpaper_monitor{i}.jpg"
         img.save(out_path, "JPEG", quality=92, exif=img.info.get("exif", b""))
-        (cfg.data_dir / f"wallpaper_monitor{i}.json").write_text(json.dumps(meta, indent=2))
+        _atomic_write_text(cfg.data_dir / f"wallpaper_monitor{i}.json", json.dumps(meta, indent=2))
         assignments[monitor.id] = out_path
         logging.info("[%s] Rendered for monitor %d (%s)", combo.name, i, monitor.id)
 
@@ -1740,18 +2189,31 @@ def main(argv: list[str] | None = None) -> int:
     overrides = {
         k: v for k, v in vars(args).items() if k != "config"
     }
-    cfg = load_config(args.config, overrides)
+    # Chicken-and-egg: get_platform() needs cfg.platform (which backend to force, if
+    # any) before it can run, but load_config() wants a WallpaperPlatform in hand to
+    # supply data_dir/info_font_path defaults. Resolve it with a cheap first pass
+    # that only needs cfg.platform -- load_config() itself is a pure TOML/overrides
+    # read, safe to call twice.
+    platform_probe_cfg = load_config(args.config, overrides)
+    validate_platform(platform_probe_cfg)
+    platform = get_platform(platform_probe_cfg.platform)
+    cfg = load_config(args.config, overrides, platform=platform)
     validate_combos(cfg)
     validate_source_kind(cfg)
+    validate_lonlat_crop_bounds(cfg)
+    validate_output_projection(cfg)
+    validate_platform(cfg)
     setup_logging(cfg)
 
-    platform = get_platform()
     session = build_session(cfg)
     try:
         if cfg.loop:
             run_loop(cfg, session, platform)
         else:
             _CYCLE_FUNCS[cfg.combo_mode](cfg, session, platform)
+    except KeyboardInterrupt:
+        logging.info("Interrupted, exiting")
+        return 130
     except Exception:
         logging.exception("Unhandled exception while running goes_wallpaper")
         return 1

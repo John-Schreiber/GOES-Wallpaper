@@ -1,9 +1,9 @@
 # GOES Desktop Wallpaper Updater
 
 A Python script that downloads the most recent image from a GOES weather satellite
-(NOAA STAR's public CDN) and sets it as the Windows desktop wallpaper — cropped exactly
-to your screen, with an optional info bar showing satellite/sector/product and capture
-time.
+(NOAA STAR's public CDN) and sets it as the desktop wallpaper — on Windows or KDE
+Plasma (Linux) — cropped exactly to your screen, with an optional info bar showing
+satellite/sector/product and capture time.
 
 ![Sample GOES-18 GEOCOLOR wallpaper](sample_wallpaper.jpg)
 
@@ -12,6 +12,7 @@ time.
 [Requirements](#requirements) · [Setup](#setup) · [Configuration](#configuration) ·
 [Multi-source combos](#multi-source-combos) ·
 [Georeferenced overlays](#georeferenced-overlays) ·
+[Output projection](#output-projection) ·
 [Custom raw-data source (satpy_raw)](#custom-raw-data-source-satpy_raw) ·
 [Power/network-aware fallbacks](#powernetwork-aware-fallbacks) ·
 [Cross-platform](#cross-platform) · [Freshness sync](#freshness-sync) ·
@@ -22,8 +23,11 @@ time.
 
 ## Requirements
 
-* Windows, Python 3.11+ (see "Cross-platform" below — only Windows has a working
-  backend today)
+* Python 3.11+, and either:
+  * **Windows**, or
+  * **Linux running KDE Plasma** (5.24+ recommended, for `plasma-apply-wallpaperimage`;
+    older Plasma 5 falls back to D-Bus scripting — see "Cross-platform" below). Other
+    Linux desktop environments (GNOME, etc.) aren't implemented yet.
 * [uv](https://docs.astral.sh/uv/) (recommended) or a manual venv + `pip install -e .`
 
 ## Setup
@@ -32,20 +36,28 @@ time.
 uv sync
 ```
 
+(Linux/macOS shells: same command, just without the `.ps1`-flavored examples below —
+use `uv run python goes_wallpaper.py` etc. exactly as shown, and `~/.local/share/`
+paths instead of `%LOCALAPPDATA%` where noted.)
+
 This creates `.venv/` and installs the dependencies — `requests`, `Pillow`,
-`pyproj`/`numpy` for georeferenced overlays, plus Windows-only packages (`comtypes`
-for the per-monitor wallpaper API, `winrt-Windows.System.Power`/`winrt-Windows.
-Networking.Connectivity` for battery/network-cost detection) that `uv sync` skips
-automatically on other platforms via `pyproject.toml`'s environment markers. Do a
-one-off test run with:
+`pyproj`/`numpy` for georeferenced overlays, plus OS-specific packages that `uv sync`
+only installs on the matching platform via `pyproject.toml`'s environment markers:
+`comtypes`/`winrt-Windows.System.Power`/`winrt-Windows.Networking.Connectivity` on
+Windows (per-monitor wallpaper API, battery/network-cost detection); on Linux, the KDE
+backend instead shells out to `qdbus6`/`qdbus`, `plasma-apply-wallpaperimage`,
+`upower`, and `nmcli` — all typically already present in a Plasma desktop install, not
+Python packages. Do a one-off test run with:
 
 ```powershell
 uv run python goes_wallpaper.py
 ```
 
 That downloads the latest configured image, crops it to your screen, and sets it as
-your wallpaper immediately — check `%LOCALAPPDATA%\GOES-Wallpaper\` for the saved
-`wallpaper.jpg`, `wallpaper.json` (metadata), and `log.txt`.
+your wallpaper immediately — check `%LOCALAPPDATA%\GOES-Wallpaper\` (Windows) or
+`~/AppData/Local/GOES-Wallpaper/` (Linux — same relative default path, just resolved
+under `$HOME`) for the saved `wallpaper.jpg`, `wallpaper.json` (metadata), and
+`log.txt`.
 
 ### Alternative: install as a package
 
@@ -102,6 +114,9 @@ inline comment; the highlights:
   source frame, default the full frame) crop *before* that resize, to deliberately
   frame a region of interest — or to cut off NOAA's logo watermark, which sits in the
   bottom-left corner of every frame this CDN serves. See "Source image caveats" below.
+  `source_crop_min_lon/min_lat/max_lon/max_lat` frame the same region-of-interest crop
+  by a lon/lat bounding box instead, for whichever satellite/sector actually gets
+  fetched — see "Georeferenced overlays" below for the calibration this relies on.
 * **Freshness sync** — learns *when within each interval* NOAA actually publishes a
   new frame and schedules around that, instead of guessing at the raw clock boundary.
   See "Freshness sync" below.
@@ -119,8 +134,12 @@ inline comment; the highlights:
 * **Georeferenced overlays** — `overlay_graticule` (lat/lon grid), `overlay_cities`
   (labeled markers), `overlay_geojson_files` (a cached, static list of GeoJSON files),
   and `overlay_shell_command` (an external command whose stdout is parsed as GeoJSON
-  and rendered) drawn accurately onto the image, CONUS only. See "Georeferenced
-  overlays" below.
+  and rendered) drawn accurately onto the image, for CONUS and Full Disk sectors. See
+  "Georeferenced overlays" below.
+* **`output_projection`** — reproject the rendered frame into `platecarree`/
+  `lambertconformal` (framed by `source_crop_min_lon`/etc.) or `orthographic`/
+  `lambertazimuthal` (a globe view) instead of the satellite's native GEOS view. See
+  "Output projection" below and [PROJECTIONS.md](PROJECTIONS.md) for example renders.
 
 ## Multi-source combos
 
@@ -142,7 +161,10 @@ Beyond the single top-level source, `config.toml` can define named combos and a
 
 Any combo field left unset falls back to the top-level `satellite`/`sector`/`product`/
 `resolution`; the crop fields (`crop_left/top/right/bottom`) always apply and default
-to no crop. See the commented examples in [config.toml](config.toml).
+to no crop. `crop_min_lon/min_lat/max_lon/max_lat` (the lon/lat crop-box alternative —
+see "Georeferenced overlays" below) behave like the source-selection fields instead:
+unset on a combo falls back to the top-level `source_crop_min_lon`/etc. rather than
+always applying. See the commented examples in [config.toml](config.toml).
 
 Note on monitor numbering: the `monitor` index refers to the enumeration order the
 platform backend reports (Windows: `IDesktopWallpaper`'s order), which isn't
@@ -154,16 +176,18 @@ land on the wrong screen, swap the indices.
 `overlay_graticule` (a lat/lon grid) and `overlay_cities` (labeled markers at exact
 coordinates) can be drawn accurately onto the image — accurately meaning genuinely
 georeferenced, not just eyeballed: `lonlat_to_pixels()` projects real lon/lat into the
-image's actual GEOS satellite projection using `pyproj`, with the projection extent
-for each satellite's CONUS sector derived from a real ABI L1b radiance file (loaded
-with `satpy` during development, not a runtime dependency) and validated against 10
-known city landmarks — median error well under a pixel at 2500×1500.
+image's actual GEOS satellite projection using `pyproj`. The CONUS extent for each
+satellite was derived from a real ABI L1b radiance file (loaded with `satpy` during
+development, not a runtime dependency) and validated against 10 known city landmarks —
+median error well under a pixel at 2500×1500. The Full Disk extent is reused directly
+from `satpy`'s own shipped area definitions (`goes_west`/`east_abi_f_2km`), since
+Full Disk's fixed viewing geometry is identical for every GOES-R series satellite
+regardless of orbital slot — and cross-checked in `tests/test_geolocation.py` against
+an independent `pyresample` computation over the same area.
 
-**CONUS only.** The calibration constants are specific to each satellite's CONUS
-sector extent; Full Disk wasn't calibrated, and Mesoscale sectors move (NOAA
-repositions them), so their extent can't be hardcoded the same way. Enabling an
-overlay on a non-CONUS sector logs a warning and skips drawing rather than rendering
-something misplaced.
+**CONUS and Full Disk only.** Mesoscale sectors move (NOAA repositions them), so their
+extent can't be hardcoded the same way. Enabling an overlay on a Mesoscale sector logs
+a warning and skips drawing rather than rendering something misplaced.
 
 This adds content on top — it doesn't and can't remove NOAA's own baked-in state
 lines/logo (see "Source image caveats" below for why) *for the default `cdn_jpg`
@@ -172,6 +196,44 @@ source_kind*. See the next section for a source that does remove them.
 Marker/line sizes are tuned for a ~2000px-wide frame and scale up automatically at
 higher `resolution` settings. With `source_kind = "satpy_raw"`, overlays work on any
 sector, not just CONUS — see below.
+
+## Output projection
+
+`output_projection` reprojects the rendered frame into a different map projection
+instead of the satellite's native GEOS view. `"native"` (default) means no
+reprojection; otherwise:
+
+* **Bounds-framed** (`source_crop_min_lon/min_lat/max_lon/max_lat` above, required in
+  these modes — those bounds become the reprojected output's extent):
+  * `"platecarree"` — equirectangular.
+  * `"lambertconformal"` — conformal conic, the standard choice for a mid-latitude
+    regional map (what NWS/NOAA's own CONUS maps use) — negligible distortion for a
+    CONUS-sized box, unlike `platecarree`/Mercator. Standard parallels default to 1/6
+    and 5/6 up the box's latitude range; override with
+    `output_projection_lcc_lat1`/`_lcc_lat2` for specific ones.
+* **Center-framed** (`output_projection_center_lon`/`output_projection_center_lat`,
+  defaulting to the resolved source's own satellite sub-point and the equator):
+  * `"orthographic"` — a globe view as seen from space; pixels outside the visible
+    hemisphere render black — that's "space," not a bug.
+  * `"lambertazimuthal"` — equal-area azimuthal; shows nearly the whole globe, not
+    just the visible hemisphere, without Mercator's polar blowup, at the cost of
+    shape distortion far from center.
+
+See [PROJECTIONS.md](PROJECTIONS.md) for example renders of each.
+
+Implemented with nearest-neighbor resampling via `pyproj`/`numpy` only — no
+`pyresample`/`satpy` dependency — so it works for both the default `cdn_jpg` source
+(CONUS/Full Disk, using the same hand-calibrated extents `overlay_*` uses) and
+`source_kind = "satpy_raw"` (any sector, using its real per-frame georeferencing).
+Reprojection replaces rather than stacks with the region-of-interest crop — its own
+bounds/framing already define what survives. Falls back to the native projection,
+logged, if there's no calibration for the resolved satellite/sector. Not
+combo-overridable — every combo shares one `output_projection` if set.
+
+Caveat: `cdn_jpg`'s baked-in NOAA captions/state borders warp along with everything
+else near the projection's edges, since they can't be distinguished from the rest of
+the image (see "Source image caveats" below) — this is most noticeable in
+`"orthographic"`/`"lambertazimuthal"` near the limb of the globe.
 
 ## Custom raw-data source (satpy_raw)
 
@@ -209,12 +271,16 @@ no-op here (no smaller-tier download exists for raw bands).
 
 **Status**: first cut, opt-in alongside the default `cdn_jpg` source (not a
 replacement) — no automatic fallback to `cdn_jpg` if a raw fetch fails, and no
-cross-cycle caching of downloaded band files (each cycle re-downloads into
-`<data_dir>/satpy_raw_cache`). Verified end to end against live GOES-18 data for
-both CONUS and Full Disk: real S3 listing/download, real compositing (including the
-day/night blend below, confirmed against a real terminator), and the full
-crop/info-block/EXIF pipeline producing a correct final image with no NOAA
+cross-cycle *reuse* of downloaded band files (each cycle fetches the latest scan
+fresh into `<data_dir>/satpy_raw_cache`; the previous cycle's files are deleted
+first, so this doesn't accumulate — see the disk-leak fix in
+[NEXT_STEPS.md](NEXT_STEPS.md)). Verified end to end against live GOES-18/GOES-19
+data for both CONUS and Full Disk: real S3 listing/download, real compositing
+(including the day/night blend below, confirmed against a real terminator), and the
+full crop/info-block/EXIF pipeline producing a correct final image with no NOAA
 annotations.
+
+![Sample GOES-19 Full Disk satpy_raw render, showing the day/night blend at a real terminator](sample_wallpaper_satpy_night.jpg)
 
 **Night side**: not GEOCOLOR-style synthetic city lights, by design (those come
 from a static VIIRS composite, not real-time data — see CUSTOM_IMAGERY_PLAN.md).
@@ -337,20 +403,61 @@ gracefully on hardware/platforms that can't detect it — unknown is always trea
 
 OS-specific operations (applying the wallpaper, screen/monitor detection, taskbar/dock
 avoidance, battery/network-cost detection) live behind `platform_base.WallpaperPlatform`,
-implemented today only by `platform_windows.WindowsPlatform`. `goes_wallpaper.py`
-itself — the fetch/crop/overlay/combo/scheduling logic — has no Windows-specific code
-left in it.
+implemented by `platform_windows.WindowsPlatform` and `platform_linux_kde.KDEPlatform`.
+`goes_wallpaper.py` itself — the fetch/crop/overlay/combo/scheduling logic — has no
+OS-specific code in it; `platform_base.get_platform()` picks a backend automatically
+from `sys.platform` (Windows) or `XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP`
+containing `"kde"` (Linux) and raises `NotImplementedError` for any other Linux
+desktop environment.
 
-To port to a new OS: implement every method on `WallpaperPlatform` in a new
-`platform_<name>.py` (see `platform_windows.py`'s docstring and method-by-method
-comments for what each one needs to do and how the Windows implementation validated
-each against real hardware), then add a branch for it in `platform_base.get_platform()`.
-Linux and macOS backends are wanted — no specific desktop environment is prioritized
-over another, so pick whichever you actually use (KDE, GNOME, and macOS all fit the
-same interface). Contributions beyond new platform backends are welcome too. Note
-that `pyproject.toml` marks the Windows-only dependencies (`comtypes`, the `winrt-*`
-packages) with `sys_platform == 'win32'` markers, so a new backend's dependencies
-should get the equivalent marker for its own platform.
+### KDE Plasma backend
+
+`platform_linux_kde.KDEPlatform` talks to Plasma's own D-Bus scripting interface
+(`qdbus6`/`qdbus … org.kde.PlasmaShell.evaluateScript`, the same JS API Plasma's own
+desktop shell scripting uses) for screen geometry, panel/taskbar height, and
+per-monitor wallpaper assignment — not X11-only tools like `xrandr`, since Plasma also
+needs to work under Wayland. Applying a single whole-desktop wallpaper prefers the
+`plasma-apply-wallpaperimage` CLI (shipped since Plasma 5.24) when present, falling
+back to the same D-Bus scripting otherwise. Battery and metered-network detection
+shell out to `upower`/`nmcli` directly (the de facto standard on Linux desktops
+generally, not Plasma-specific).
+
+Known limitations:
+
+* **No "span" equivalent.** KDE has no native "one image spanning all monitors"
+  wallpaper plugin the way Windows' `IDesktopWallpaper` has `DWPOS_SPAN` — each
+  screen's containment crops its own wallpaper independently. `wallpaper_style =
+  "span"` degrades to `"fill"` (cover-crop per screen) with a logged warning rather
+  than producing a misaligned image.
+* **Requires a live desktop session.** Every KDE operation needs a running
+  `plasmashell` with a reachable session D-Bus (`DBUS_SESSION_BUS_ADDRESS` pointing at
+  the logged-in user's bus) — a bare cron job or a systemd *system* (not `--user`)
+  service won't have that. See "Running periodically" below for the systemd `--user`
+  timer setup this requires.
+* **Verification status**: the default single-screen apply path (`get_screen_size` +
+  `apply_wallpaper`) has been confirmed against a real Plasma session — the desktop's
+  actual `org.kde.image` wallpaper config was checked directly via `qdbus6 …
+  evaluateScript` and matched the freshly-rendered file after a run. `per_monitor`
+  combo mode, real multi-monitor geometry, panel-height detection against an actual
+  panel, and `upower`/`nmcli` output parsing are still only covered by the unit
+  tests' mocked subprocess output, not live multi-monitor/battery/metered-network
+  hardware — see `NEXT_STEPS.md` item 11 for specifics.
+
+### Adding another OS/desktop environment
+
+To port to a new OS or Linux desktop environment: implement every method on
+`WallpaperPlatform` in a new `platform_<name>.py` (see `platform_windows.py`'s and
+`platform_linux_kde.py`'s docstrings and method-by-method comments for what each one
+needs to do and how each existing implementation validated against real hardware),
+then add a branch for it in `platform_base.get_platform()`. A backend for any other
+OS or desktop environment (GNOME, macOS, etc.) is welcome — none prioritized over
+another, pick whichever you actually use. Contributions beyond new platform backends
+are welcome too. Note that `pyproject.toml` marks platform-specific Python
+*package* dependencies (`comtypes`, the `winrt-*` packages) with `sys_platform ==
+'win32'` markers; the KDE backend instead depends on external binaries
+(`qdbus6`/`qdbus`, `plasma-apply-wallpaperimage`, `upower`, `nmcli`) that aren't
+`pyproject.toml` dependencies at all — it degrades gracefully (logs a warning, returns
+an "unknown"/conservative default) if one is missing rather than failing to import.
 
 ## Freshness sync
 
@@ -373,7 +480,9 @@ CONUS/GEOCOLOR, but it varies by satellite/product). Three settings, layered:
 
 ## Running periodically
 
-Two options — pick one, not both:
+Pick one option, not both — for either platform, don't combine the built-in `--loop`
+mode with an OS scheduler also invoking the script; they'll fight over the same
+`wallpaper.jpg`/`state.json` and double the request rate to NOAA's CDN.
 
 ### Option A: built-in `--loop` mode
 
@@ -383,8 +492,15 @@ uv run python goes_wallpaper.py --loop
 
 Runs indefinitely, sleeping until the next scheduled cycle (`interval_minutes` in
 `config.toml`, default 5). This is the simplest option for a machine that's normally
-on and logged in — start it once (e.g. from a shortcut in your Startup folder) and
-leave it running.
+on and logged in — start it once and leave it running: on Windows, e.g. from a
+shortcut in your Startup folder; on KDE Plasma, add it to *System Settings → Startup
+and Shutdown → Autostart* as a "login script" running `uv run python
+goes_wallpaper.py --loop` with the working directory set to the repo (or installed
+package's) location — the direct Linux analogue of the Windows Startup-folder
+approach, same tradeoffs (one long-running process, no external retry/restart
+semantics if it crashes). Either way this still needs a live desktop session — see
+the KDE backend's "requires a live desktop session" caveat under "Cross-platform"
+above — that's true of Option C below too, not something a scheduler works around.
 
 ### Option B: Windows Task Scheduler
 
@@ -415,6 +531,73 @@ and relying on `wait_for_fresh_capture`'s poll-and-retry loop — no-op until a 
 has been learned from a prior run, and capped by `wait_for_sync_max_seconds` so it
 can't hang the task for most of a cycle if your trigger interval doesn't match
 `interval_minutes`.
+
+### Option C: Linux — systemd `--user` timer (KDE Plasma)
+
+The Linux analogue of Task Scheduler, and the recommended way to run this
+unattended-but-logged-in on KDE: a `oneshot` service plus a timer that repeatedly
+activates it, both installed as **user** units (`~/.config/systemd/user/`, *not*
+`/etc/systemd/system/`). This matters more here than it might sound: the KDE backend
+talks to `plasmashell` over your login session's D-Bus bus, which only exists once
+you're logged into a graphical session — a system-level service or a plain cron job
+runs with no `DBUS_SESSION_BUS_ADDRESS` at all and can't reach it (see the
+`platform_linux_kde` note under "Cross-platform" above).
+
+`~/.config/systemd/user/goes-wallpaper.service`:
+
+```ini
+[Unit]
+Description=Update GOES satellite wallpaper
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/path/to/GOES-Wallpaper-fork
+ExecStart=%h/path/to/GOES-Wallpaper-fork/.venv/bin/python goes_wallpaper.py
+```
+
+(`%h` expands to your home directory. If you installed the package instead — see
+"Alternative: install as a package" above — point `ExecStart` at
+`%h/.local/bin/goes-wallpaper --config %h/path/to/config.toml` instead, since an
+installed copy has no `config.toml` sitting next to it and doesn't need
+`WorkingDirectory` set.)
+
+`~/.config/systemd/user/goes-wallpaper.timer`:
+
+```ini
+[Unit]
+Description=Run goes-wallpaper.service on a schedule
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+`OnUnitActiveSec` sets the interval — match it to `interval_minutes` in
+`config.toml` (default 5, matching NOAA's CONUS publish cadence). `Persistent=true`
+makes systemd catch up with one run after boot/login if a scheduled run was missed
+while the session wasn't active (Task Scheduler's "run as soon as possible after a
+missed start," equivalent). Add `--wait-for-sync` to `ExecStart`'s arguments for the
+same reason as the Task Scheduler option above.
+
+Enable it:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now goes-wallpaper.timer
+```
+
+Check status and logs with `systemctl --user status goes-wallpaper.timer` and
+`journalctl --user -u goes-wallpaper.service` — in addition to the app's own
+`log.txt` in its data dir. Since these are user units, they only run while you have
+an active login session (graphical or not) by default — exactly the constraint the
+KDE backend already requires, so there's nothing extra to configure for that; you do
+*not* need `loginctl enable-linger`, which is for running user units without any
+active login, a mode the KDE backend can't use anyway since it needs the live
+`plasmashell` session.
 
 ## Source image caveats
 
@@ -482,8 +665,9 @@ new `source_kind`, overlay, or crop setting looks right before enabling it for r
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) — a Linux or macOS platform backend is the
-contribution most likely to be useful right now, but other changes are welcome too.
+See [CONTRIBUTING.md](CONTRIBUTING.md) — Windows and KDE Plasma both have working
+backends now; a backend for any other OS/desktop environment is a welcome
+contribution (none prioritized over another), and other changes are welcome too.
 
 ## Changelog
 
