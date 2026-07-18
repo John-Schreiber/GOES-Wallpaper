@@ -5,12 +5,23 @@
 """Unit-tests get_taskbar_height's SHAppBarMessage-based edge detection: ctypes.windll
 is mocked throughout, so these confirm the Python-side logic (only a bottom-docked
 taskbar contributes a margin), not the real Shell_TrayWnd/SHAppBarMessage behavior
-(verified against real hardware -- see platform_windows.py's module docstring)."""
+(verified against real hardware -- see platform_windows.py's module docstring).
+
+Windows-only: unlike platform_linux_kde.py (subprocess-based, no OS-specific import at
+module level), platform_windows.py imports comtypes/winrt unconditionally, which
+aren't installed on other platforms at all (see pyproject.toml's sys_platform ==
+'win32' markers) -- so this module must skip at collection time on Linux/macOS CI
+rather than fail to import."""
+
+import sys
+
+import pytest
+
+if sys.platform != "win32":
+    pytest.skip("Windows-only: platform_windows.py imports comtypes/winrt", allow_module_level=True)
 
 import ctypes
 from unittest.mock import patch
-
-import pytest
 
 import platform_windows as pw
 
