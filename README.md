@@ -83,9 +83,13 @@ Skip the build step entirely by grabbing the wheel from the
 instead of cloning the repo:
 
 ```powershell
-uv tool install https://github.com/John-Schreiber/GOES-Wallpaper/releases/download/v2.2.0/goes_wallpaper-2.2.0-py3-none-any.whl
+$whl = (Invoke-RestMethod https://api.github.com/repos/John-Schreiber/GOES-Wallpaper/releases/latest).assets.browser_download_url | Where-Object { $_ -like "*.whl" }
+uv tool install $whl
 goes-wallpaper --config path\to\config.toml
 ```
+
+(Resolves whatever the current latest release's wheel is via the GitHub API, so this
+command doesn't need editing every release — no version number hardcoded.)
 
 (Or download the `.whl` manually and point `uv tool install`/`pip install` at the local
 file.) Same `--config` caveat as above applies — a release install has no `config.toml`
