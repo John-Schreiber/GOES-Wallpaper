@@ -37,6 +37,11 @@ class TestGetPlatformOverride:
 
         assert isinstance(platform_base.get_platform("windows"), WindowsPlatform)
 
+    @pytest.mark.skipif(sys.platform != "darwin", reason="platform_macos needs macOS-only pyobjc (AppKit/Foundation) deps")
+    def test_macos_override_returns_macos_platform(self):
+        from platform_macos import MacOSPlatform
+        assert isinstance(platform_base.get_platform("macos"), MacOSPlatform)
+
 
 class TestGetPlatformAutoDetection:
     def test_auto_detects_kde_from_xdg_current_desktop(self, monkeypatch):
@@ -63,7 +68,12 @@ class TestGetPlatformAutoDetection:
             platform_base.get_platform("auto")
 
     def test_auto_raises_for_unsupported_sys_platform(self, monkeypatch):
-        monkeypatch.setattr(sys, "platform", "darwin")
+        # "darwin" used to be the example here, but it's no longer unsupported now
+        # that platform_macos.MacOSPlatform exists (see
+        # test_macos_override_returns_macos_platform above) -- use a genuinely
+        # unsupported sys.platform value instead so this still tests the real
+        # "no backend for this OS" path.
+        monkeypatch.setattr(sys, "platform", "freebsd13")
         with pytest.raises(NotImplementedError, match="No WallpaperPlatform backend"):
             platform_base.get_platform("auto")
 

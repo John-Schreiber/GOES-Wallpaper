@@ -217,7 +217,7 @@ class Config:
     # detects from sys.platform / XDG_CURRENT_DESKTOP, same as always -- explicit
     # "windows"/"kde" short-circuit that detection, e.g. for a KDE session whose
     # XDG_CURRENT_DESKTOP isn't set reliably. See platform_base.get_platform().
-    platform: str = "auto"  # "auto" | "windows" | "kde"
+    platform: str = "auto"  # "auto" | "windows" | "kde" | "macos"
 
     # Output
     # This class-level default is Windows-specific and only applies when Config is
@@ -629,7 +629,7 @@ def validate_output_projection(cfg: Config) -> None:
             )
 
 
-_VALID_PLATFORMS = {"auto", "windows", "kde"}
+_VALID_PLATFORMS = {"auto", "windows", "kde", "macos"}
 
 
 def validate_platform(cfg: Config) -> None:

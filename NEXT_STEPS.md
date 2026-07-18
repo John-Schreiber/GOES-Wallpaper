@@ -342,3 +342,22 @@ A few non-obvious things learned while building and testing this, not really
     pixels) directly instead of warping pixels already drawn in the source grid —
     would also want `pyresample`/similar for the base-image resampling at that
     point, since it'd be adding a real dependency anyway.
+22. **A third backend now exists (`platform_macos.MacOSPlatform`) and single-monitor
+    wallpaper apply is verified on real hardware**, the same milestone item 11
+    documents for the KDE backend. A live run on a real MacBook with a single
+    (built-in) display confirmed the default (`combo_mode = "single"`) path end to
+    end: `get_screen_size()` detection, the Cocoa-bottom-up-to-top-down coordinate
+    flip, and `apply_wallpaper()`'s `NSWorkspace.setDesktopImageURL_forScreen_
+    options_error_` call and style mapping (including the "tile"/"span" → "fill"
+    degradation) all behaved as documented, and `get_taskbar_height`'s
+    `visibleFrame.origin.y` Dock-height reasoning matched the real Dock. Still
+    outstanding, only exercised via the unit tests' mocked output so far, not live
+    hardware: `list_monitors`/`apply_wallpaper_per_monitor` against real
+    multi-monitor geometry (needs an external display), and `get_power_state`'s
+    `pmset -g batt` parsing on battery (including the no-battery-present desktop-Mac
+    case). Whoever picks this up next should run these remaining paths against a
+    real Mac (ideally with an external monitor to exercise `list_monitors`/
+    `apply_wallpaper_per_monitor`, and on battery to exercise `get_power_state`)
+    and update `platform_macos.py`'s module docstring plus README's "macOS backend"
+    section with what's actually confirmed, the same way item 11 documents KDE's
+    remaining verification gaps.
