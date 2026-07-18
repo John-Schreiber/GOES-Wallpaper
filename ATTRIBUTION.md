@@ -44,8 +44,8 @@ unfilled — reproduced here exactly as committed.
 
 ## Techniques
 
-- **Georeferenced overlays** (`overlay_graticule`/`overlay_cities` in
-  `goes_wallpaper.py`) owe a real debt to
+- **Georeferenced overlays** (the graticule/city-marker overlays described in
+  `OVERLAYS.md`) owe a real debt to
   [lanceberc/GOES](https://github.com/lanceberc/GOES) — its write-up of georeferencing
   NOAA's rendered GEOS-projection imagery from documented sector offset/resolution
   constants, without needing raw satellite files, was exactly the idea this feature

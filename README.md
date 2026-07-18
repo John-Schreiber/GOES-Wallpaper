@@ -11,12 +11,12 @@ satellite/sector/product and capture time.
 
 [Requirements](#requirements) · [Setup](#setup) · [Configuration](#configuration) ·
 [Multi-source combos](#multi-source-combos) ·
-[Georeferenced overlays](#georeferenced-overlays) ·
+[Georeferenced overlays](#georeferenced-overlays) (full schema: [OVERLAYS.md](OVERLAYS.md)) ·
 [Output projection](#output-projection) ·
 [Custom raw-data source (satpy_raw)](#custom-raw-data-source-satpy_raw) ·
 [Power/network-aware fallbacks](#powernetwork-aware-fallbacks) ·
 [Cross-platform](#cross-platform) · [Freshness sync](#freshness-sync) ·
-[Running periodically](#running-periodically) ·
+[Running periodically](#running-periodically) (full guide: [RUNNING.md](RUNNING.md)) ·
 [Source image caveats](#source-image-caveats) ·
 [Notes and known limitations](#notes-and-known-limitations) · [Tests](#tests) ·
 [Contributing](#contributing) · [Changelog](#changelog) · [License](#license)
@@ -120,7 +120,7 @@ inline comment; the highlights:
   bottom-left corner of every frame this CDN serves. See "Source image caveats" below.
   `source_crop_min_lon/min_lat/max_lon/max_lat` frame the same region-of-interest crop
   by a lon/lat bounding box instead, for whichever satellite/sector actually gets
-  fetched — see "Georeferenced overlays" below for the calibration this relies on.
+  fetched — see [OVERLAYS.md](OVERLAYS.md) for the calibration this relies on.
 * **Freshness sync** — learns *when within each interval* NOAA actually publishes a
   new frame and schedules around that, instead of guessing at the raw clock boundary.
   See "Freshness sync" below.
@@ -135,11 +135,10 @@ inline comment; the highlights:
   `"per_monitor"`) plus a list of named `[[combos]]`, each optionally overriding
   satellite/sector/product/resolution and carrying its own crop box. See "Multi-source
   combos" below.
-* **Georeferenced overlays** — `overlay_graticule` (lat/lon grid), `overlay_cities`
-  (labeled markers), `overlay_geojson_files` (a cached, static list of GeoJSON files),
-  and `overlay_shell_command` (an external command whose stdout is parsed as GeoJSON
-  and rendered) drawn accurately onto the image, for CONUS and Full Disk sectors. See
-  "Georeferenced overlays" below.
+* **Georeferenced overlays** — a lat/lon grid, labeled city markers, GeoJSON files,
+  and a live shell-command GeoJSON source, drawn accurately onto the image for CONUS
+  and Full Disk sectors — configured separately, in `overlays.toml`, not here. See
+  [OVERLAYS.md](OVERLAYS.md).
 * **`output_projection`** — reproject the rendered frame into `platecarree`/
   `lambertconformal` (framed by `source_crop_min_lon`/etc.) or `orthographic`/
   `lambertazimuthal` (a globe view) instead of the satellite's native GEOS view. See
@@ -177,29 +176,12 @@ land on the wrong screen, swap the indices.
 
 ## Georeferenced overlays
 
-`overlay_graticule` (a lat/lon grid) and `overlay_cities` (labeled markers at exact
-coordinates) can be drawn accurately onto the image — accurately meaning genuinely
-georeferenced, not just eyeballed: `lonlat_to_pixels()` projects real lon/lat into the
-image's actual GEOS satellite projection using `pyproj`. The CONUS extent for each
-satellite was derived from a real ABI L1b radiance file (loaded with `satpy` during
-development, not a runtime dependency) and validated against 10 known city landmarks —
-median error well under a pixel at 2500×1500. The Full Disk extent is reused directly
-from `satpy`'s own shipped area definitions (`goes_west`/`east_abi_f_2km`), since
-Full Disk's fixed viewing geometry is identical for every GOES-R series satellite
-regardless of orbital slot — and cross-checked in `tests/test_geolocation.py` against
-an independent `pyresample` computation over the same area.
-
-**CONUS and Full Disk only.** Mesoscale sectors move (NOAA repositions them), so their
-extent can't be hardcoded the same way. Enabling an overlay on a Mesoscale sector logs
-a warning and skips drawing rather than rendering something misplaced.
-
-This adds content on top — it doesn't and can't remove NOAA's own baked-in state
-lines/logo (see "Source image caveats" below for why) *for the default `cdn_jpg`
-source_kind*. See the next section for a source that does remove them.
-
-Marker/line sizes are tuned for a ~2000px-wide frame and scale up automatically at
-higher `resolution` settings. With `source_kind = "satpy_raw"`, overlays work on any
-sector, not just CONUS — see below.
+A lat/lon grid, labeled city markers, static GeoJSON files, and a live shell-command
+GeoJSON source can all be drawn accurately onto the image — accurately meaning
+genuinely georeferenced, not just eyeballed. Configured in a separate file,
+`overlays.toml`, not `config.toml`. See [OVERLAYS.md](OVERLAYS.md) for the full
+schema, styling rules, and the CONUS/Full Disk-only calibration caveat (any sector
+with `source_kind = "satpy_raw"`, below).
 
 ## Output projection
 
@@ -227,8 +209,9 @@ See [PROJECTIONS.md](PROJECTIONS.md) for example renders of each.
 
 Implemented with nearest-neighbor resampling via `pyproj`/`numpy` only — no
 `pyresample`/`satpy` dependency — so it works for both the default `cdn_jpg` source
-(CONUS/Full Disk, using the same hand-calibrated extents `overlay_*` uses) and
-`source_kind = "satpy_raw"` (any sector, using its real per-frame georeferencing).
+(CONUS/Full Disk, using the same hand-calibrated extents overlays use — see
+[OVERLAYS.md](OVERLAYS.md)) and `source_kind = "satpy_raw"` (any sector, using its
+real per-frame georeferencing).
 Reprojection replaces rather than stacks with the region-of-interest crop — its own
 bounds/framing already define what survives. Falls back to the native projection,
 logged, if there's no calibration for the resolved satellite/sector. Not
@@ -242,8 +225,9 @@ the image (see "Source image caveats" below) — this is most noticeable in
 Quality caveat: reprojection is nearest-neighbor only (no smoothing/anti-aliasing),
 so the valid-data/black boundary in `"orthographic"`/`"lambertazimuthal"` renders
 visibly jagged rather than a clean curve — see the gallery in
-[PROJECTIONS.md](PROJECTIONS.md). It also runs *after* `overlay_*` is drawn (not
-before), so graticule lines, city markers/labels, and GeoJSON overlays get warped
+[PROJECTIONS.md](PROJECTIONS.md). It also runs *after* overlays (see
+[OVERLAYS.md](OVERLAYS.md)) are drawn (not before), so graticule lines, city
+markers/labels, and GeoJSON overlays get warped
 along with the base image instead of being redrawn cleanly in the destination
 projection — thin lines can break into dashed/patchy pixels and text labels can
 shear, worst near the projection's edges (same region the caveat above already
@@ -328,83 +312,10 @@ Disk, and especially on a metered/limited connection — `metered_resolution` ca
 help here (see above). Test with `--render-to` (see "Tests" below) before
 committing to a `--loop` schedule.
 
-`overlay_geojson_files` takes a list of local GeoJSON file paths — for content that
-doesn't change cycle to cycle (state/county borders, a coastline layer, a fixed set of
-markers). Every file's features are merged and drawn with the same
-`Point`/`LineString`/`Polygon`/`Multi*` support and styling described in "GeoJSON
-overlay styling" below, but the composited result is cached as a PNG in `data_dir`
-(`overlay_geojson_cache_<id>.png` + a matching `.json` sidecar recording what produced
-it, where `<id>` is a short hash of the file paths/satellite/frame size/style — so a
-combo using CONUS/GOES18 at 2500×1500 and one using CONUS/GOES19 at 5000×3000 each get
-their own cache entry instead of overwriting a shared one). Within one cache entry,
-staleness is checked on each file's path *and* modification time, plus
-satellite/resolution/style. An unchanged config only pays the parse/project/draw cost
-once; editing a file, bumping `resolution`, or changing any `overlay_geojson_*` setting
-invalidates that entry and it's rebuilt on the next cycle (old entries for
-since-changed configs are simply left behind in `data_dir` — nothing prunes them).
-Style config: `overlay_geojson_color`, `overlay_geojson_line_width`,
-`overlay_geojson_marker_radius`, `overlay_geojson_opacity`, `overlay_geojson_font_size`.
-
-`overlay_shell_command` runs an external command (an argv list, e.g. `["python",
-"fetch_storms.py"]` — not a shell string, so there's no shell-injection risk) once per
-cycle and expects a GeoJSON `FeatureCollection`/`Feature`/bare geometry on stdout.
-Whatever `Point`/`LineString`/`Polygon` (or `Multi*`) features it returns are drawn with
-the same styling described below. A non-zero exit code, a timeout
-(`overlay_shell_timeout`), or unparseable stdout is logged and skipped rather than
-breaking the update cycle. Unlike `overlay_geojson_files`, this always re-runs the
-command every cycle — there's no caching, since the whole point of shelling out is
-presumably to pick up genuinely fresh data. Style config: `overlay_shell_color`,
-`overlay_shell_line_width`, `overlay_shell_marker_radius`, `overlay_shell_opacity`,
-`overlay_shell_font_size`.
-
-Both are minimal first steps toward the fuller `OverlayProvider` plugin interface
-scoped in `NEXT_STEPS.md` (a real plugin registry with multiple named providers,
-independent fetch cadence, and per-plugin failure isolation) — good for one static
-file set and one external script, not yet a general multi-provider system.
-
-### GeoJSON overlay styling
-
-Both `overlay_geojson_files` and `overlay_shell_command` draw through the same shared
-code (`_build_geojson_layer` in `goes_wallpaper.py`), so they're styled identically —
-just from their own separate set of `overlay_geojson_*`/`overlay_shell_*` config
-fields. For a given feature:
-
-* **Geometry type decides the draw call.** `Point`/`MultiPoint` → an outlined circle
-  (radius = `..._marker_radius`, stroke width = `..._line_width`) at each point.
-  `LineString`/`MultiLineString` → an open polyline. `Polygon`/`MultiPolygon` → each
-  ring drawn as a *closed, outlined* loop — **not filled**; there's no fill color
-  config, only stroke. Any other/missing `geometry.type` (e.g. `GeometryCollection`, or
-  a feature with no `geometry` at all) is silently skipped, not an error.
-* **`Point`/`MultiPoint` features get a text label from `properties.name`**, drawn next
-  to the marker the same way `overlay_cities` labels a city (font size:
-  `..._font_size`, using the shared `info_font_path`; falls back to a built-in default
-  font if that path can't be loaded). No `name` property means no label — just the
-  marker. A `MultiPoint`'s single `name` is drawn next to *every* point in it, since
-  GeoJSON has no way to give each point its own name. `LineString`/`Polygon` features
-  ignore `properties.name` entirely — there's no single anchor point to draw a label
-  at.
-* **Only color and (for points) the label are overridable per feature.** A feature's
-  `properties.color` replaces `..._color` for that one feature — accepts an `[r, g, b]`
-  list, a hex string (`"#ff8800"`), or any of PIL's ~140 named colors (`"red"`), so
-  GeoJSON exported from common tools (geojson.io, GitHub's simplestyle-spec) works
-  as-is without converting colors to lists first. A value that doesn't parse as any of
-  those falls back to `..._color` (logged), rather than raising and losing the whole
-  overlay over one bad feature. Handy for e.g. color-coding storm tracks by category,
-  or fire perimeters by containment status. Line width, marker radius, opacity, and
-  font size always come from config; there's no `properties.line_width` or similar for
-  those.
-* **Opacity is a single alpha value** (`..._opacity`, 0–255) applied uniformly to every
-  feature's fill color when compositing — not part of `properties`, and not adjustable
-  per feature the way color is.
-* **Line width and marker radius scale with output resolution**, exactly like
-  `overlay_graticule`/`overlay_cities`: both are tuned for a ~2000px-wide frame
-  (`_OVERLAY_REFERENCE_WIDTH_PX`) and scale up proportionally at higher `resolution`
-  settings, so a config tuned at one resolution still looks right at another.
-* **A point/vertex that projects outside the visible frame breaks the line/ring at
-  that point** rather than drawing a stray edge across the image — the same
-  run-breaking behavior `draw_graticule` uses. For a `Polygon`, this means a shape with
-  a corner just outside the frame renders as an open outline missing the two edges
-  that meet at that corner, not a rubber-banded line back across the frame.
+Georeferenced overlays (a lat/lon grid, city markers, GeoJSON files, a live
+shell-command source) work on any sector with this source_kind, not just CONUS/Full
+Disk, via its real per-frame georeferencing — see [OVERLAYS.md](OVERLAYS.md) for the
+full schema and styling rules.
 
 ## Power/network-aware fallbacks
 
@@ -497,128 +408,13 @@ CONUS/GEOCOLOR, but it varies by satellite/product). Three settings, layered:
   posted yet), it retries a few times before giving up rather than applying stale
   content.
 * **`--wait-for-sync`** (off by default) is for single-shot/Task Scheduler use — see
-  "Running periodically" below.
+  [RUNNING.md](RUNNING.md).
 
 ## Running periodically
 
-Pick one option, not both — for either platform, don't combine the built-in `--loop`
-mode with an OS scheduler also invoking the script; they'll fight over the same
-`wallpaper.jpg`/`state.json` and double the request rate to NOAA's CDN.
-
-### Option A: built-in `--loop` mode
-
-```powershell
-uv run python goes_wallpaper.py --loop
-```
-
-Runs indefinitely, sleeping until the next scheduled cycle (`interval_minutes` in
-`config.toml`, default 5). This is the simplest option for a machine that's normally
-on and logged in — start it once and leave it running: on Windows, e.g. from a
-shortcut in your Startup folder; on KDE Plasma, add it to *System Settings → Startup
-and Shutdown → Autostart* as a "login script" running `uv run python
-goes_wallpaper.py --loop` with the working directory set to the repo (or installed
-package's) location — the direct Linux analogue of the Windows Startup-folder
-approach, same tradeoffs (one long-running process, no external retry/restart
-semantics if it crashes). Either way this still needs a live desktop session — see
-the KDE backend's "requires a live desktop session" caveat under "Cross-platform"
-above — that's true of Option C below too, not something a scheduler works around.
-
-### Option B: Windows Task Scheduler
-
-Closer to how the original version of this script was run, and works well if you'd
-rather Task Scheduler own the retry/restart semantics:
-
-* **Trigger**: one-time trigger starting whenever you set it up, then "repeat every X
-  minutes/hours indefinitely." NOAA publishes a new CONUS image every 5 minutes.
-* **Action**: start a program —
-  * Program: `C:\path\to\GOES-Wallpaper-fork\.venv\Scripts\pythonw.exe`
-  * Arguments: `goes_wallpaper.py`
-  * Start in: `C:\path\to\GOES-Wallpaper-fork`
-
-  Use the venv's `pythonw.exe`, not a bare system one — it's the interpreter `uv sync`
-  actually installed the dependencies into. `pythonw.exe` (vs `python.exe`) runs
-  without popping up a console window, regardless of the target script's extension.
-  If you installed the package instead (see "Alternative: install as a package"
-  above), point Program at `goes-wallpaperw.exe` directly instead and leave
-  Arguments/Start in blank.
-* **Condition**: start only if a network connection is available.
-* **Settings**: run task as soon as possible after a missed scheduled start; don't
-  start a new instance if one's already running; **run only when a user is logged
-  on** — see the note below on why this matters.
-
-Add `--wait-for-sync` to the arguments if you'd rather the script sleep once until
-shortly after the next frame's learned publish time, instead of fetching immediately
-and relying on `wait_for_fresh_capture`'s poll-and-retry loop — no-op until a phase
-has been learned from a prior run, and capped by `wait_for_sync_max_seconds` so it
-can't hang the task for most of a cycle if your trigger interval doesn't match
-`interval_minutes`.
-
-### Option C: Linux — systemd `--user` timer (KDE Plasma)
-
-The Linux analogue of Task Scheduler, and the recommended way to run this
-unattended-but-logged-in on KDE: a `oneshot` service plus a timer that repeatedly
-activates it, both installed as **user** units (`~/.config/systemd/user/`, *not*
-`/etc/systemd/system/`). This matters more here than it might sound: the KDE backend
-talks to `plasmashell` over your login session's D-Bus bus, which only exists once
-you're logged into a graphical session — a system-level service or a plain cron job
-runs with no `DBUS_SESSION_BUS_ADDRESS` at all and can't reach it (see the
-`platform_linux_kde` note under "Cross-platform" above).
-
-`~/.config/systemd/user/goes-wallpaper.service`:
-
-```ini
-[Unit]
-Description=Update GOES satellite wallpaper
-
-[Service]
-Type=oneshot
-WorkingDirectory=%h/path/to/GOES-Wallpaper-fork
-ExecStart=%h/path/to/GOES-Wallpaper-fork/.venv/bin/python goes_wallpaper.py
-```
-
-(`%h` expands to your home directory. If you installed the package instead — see
-"Alternative: install as a package" above — point `ExecStart` at
-`%h/.local/bin/goes-wallpaper --config %h/path/to/config.toml` instead, since an
-installed copy has no `config.toml` sitting next to it and doesn't need
-`WorkingDirectory` set.)
-
-`~/.config/systemd/user/goes-wallpaper.timer`:
-
-```ini
-[Unit]
-Description=Run goes-wallpaper.service on a schedule
-
-[Timer]
-OnBootSec=1min
-OnUnitActiveSec=5min
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
-
-`OnUnitActiveSec` sets the interval — match it to `interval_minutes` in
-`config.toml` (default 5, matching NOAA's CONUS publish cadence). `Persistent=true`
-makes systemd catch up with one run after boot/login if a scheduled run was missed
-while the session wasn't active (Task Scheduler's "run as soon as possible after a
-missed start," equivalent). Add `--wait-for-sync` to `ExecStart`'s arguments for the
-same reason as the Task Scheduler option above.
-
-Enable it:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now goes-wallpaper.timer
-```
-
-Check status and logs with `systemctl --user status goes-wallpaper.timer` and
-`journalctl --user -u goes-wallpaper.service` — in addition to the app's own
-`log.txt` in its data dir. Since these are user units, they only run while you have
-an active login session (graphical or not) by default — exactly the constraint the
-KDE backend already requires, so there's nothing extra to configure for that; you do
-*not* need `loginctl enable-linger`, which is for running user units without any
-active login, a mode the KDE backend can't use anyway since it needs the live
-`plasmashell` session.
+Three options — the built-in `--loop` mode, Windows Task Scheduler, or a Linux
+systemd `--user` timer — with setup instructions for each and why you'd pick one
+over another. See [RUNNING.md](RUNNING.md).
 
 ## Source image caveats
 
