@@ -162,6 +162,12 @@ class Config:
     # See CUSTOM_IMAGERY_PLAN.md for the full design rationale.
     source_kind: str = "cdn_jpg"
 
+    # Which platform_base.WallpaperPlatform backend to use. "auto" (default)
+    # detects from sys.platform / XDG_CURRENT_DESKTOP, same as always -- explicit
+    # "windows"/"kde" short-circuit that detection, e.g. for a KDE session whose
+    # XDG_CURRENT_DESKTOP isn't set reliably. See platform_base.get_platform().
+    platform: str = "auto"  # "auto" | "windows" | "kde"
+
     # Output
     # This class-level default is Windows-specific and only applies when Config is
     # constructed directly (as most tests do). The real CLI entry point
@@ -566,6 +572,14 @@ def validate_output_projection(cfg: Config) -> None:
                 f'output_projection = "{cfg.output_projection}" requires a complete lon/lat crop box '
                 f"(source_crop_min_lon/min_lat/max_lon/max_lat, or a per-combo override) for {label}"
             )
+
+
+_VALID_PLATFORMS = {"auto", "windows", "kde"}
+
+
+def validate_platform(cfg: Config) -> None:
+    if cfg.platform not in _VALID_PLATFORMS:
+        raise ValueError(f"platform must be one of {sorted(_VALID_PLATFORMS)}, got {cfg.platform!r}")
 
 
 @dataclass(slots=True)
@@ -2175,12 +2189,20 @@ def main(argv: list[str] | None = None) -> int:
     overrides = {
         k: v for k, v in vars(args).items() if k != "config"
     }
-    platform = get_platform()
+    # Chicken-and-egg: get_platform() needs cfg.platform (which backend to force, if
+    # any) before it can run, but load_config() wants a WallpaperPlatform in hand to
+    # supply data_dir/info_font_path defaults. Resolve it with a cheap first pass
+    # that only needs cfg.platform -- load_config() itself is a pure TOML/overrides
+    # read, safe to call twice.
+    platform_probe_cfg = load_config(args.config, overrides)
+    validate_platform(platform_probe_cfg)
+    platform = get_platform(platform_probe_cfg.platform)
     cfg = load_config(args.config, overrides, platform=platform)
     validate_combos(cfg)
     validate_source_kind(cfg)
     validate_lonlat_crop_bounds(cfg)
     validate_output_projection(cfg)
+    validate_platform(cfg)
     setup_logging(cfg)
 
     session = build_session(cfg)

@@ -16,11 +16,17 @@
 
 """KDE Plasma backend for platform_base.WallpaperPlatform.
 
-Unlike platform_windows.py, this was built from documentation and working
-community examples rather than against a live KDE session (development here is on
-Windows) -- see NEXT_STEPS.md for what's still unverified. Treat method bodies as
-"should work per KDE's own docs/source" rather than "confirmed against real
-hardware" until someone with a KDE box tries it.
+Originally built from documentation and working community examples rather than
+against a live KDE session (initial development was on Windows). The default
+single-screen path (get_screen_size + apply_wallpaper) has since been confirmed
+against a real Plasma session -- a live run's desktop wallpaper config was checked
+directly via `qdbus6 ... evaluateScript` and matched the freshly-rendered file.
+per_monitor wallpaper assignment, real multi-monitor geometry, panel-height
+detection against an actual panel, and upower/nmcli output parsing are still only
+exercised through this module's unit tests' mocked subprocess output, not live
+hardware -- see NEXT_STEPS.md item 11 for the exact breakdown. Treat those
+untested paths as "should work per KDE's own docs/source" rather than "confirmed
+against real hardware" until someone exercises them live.
 
 Screen geometry, taskbar (panel) height, and both apply_wallpaper paths are done
 through Plasma's own D-Bus scripting interface (`qdbus .../PlasmaShell

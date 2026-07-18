@@ -35,6 +35,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   and `satpy_raw` (any sector, via its real per-frame georeferencing). See
   [PROJECTIONS.md](PROJECTIONS.md) for example renders of each. Pixels outside
   the visible hemisphere in `"orthographic"` render black.
+- KDE Plasma backend (`platform_linux_kde.KDEPlatform`), auto-selected on Linux when
+  `XDG_CURRENT_DESKTOP`/`XDG_SESSION_DESKTOP` contains `"kde"`. Implements the full
+  `WallpaperPlatform` interface via Plasma's D-Bus scripting interface and the
+  `plasma-apply-wallpaperimage` CLI (screen/monitor geometry, per-monitor wallpaper
+  assignment, panel/taskbar height) plus `upower`/`nmcli` for battery/metered-network
+  detection. `wallpaper_style = "span"` degrades to `"fill"` with a logged warning —
+  KDE has no multi-monitor spanning primitive. Default single-screen apply verified
+  against a real Plasma session; `per_monitor` mode and a few other paths are still
+  unit-test-only — see `NEXT_STEPS.md` for the exact breakdown.
+- `platform` config setting (`"auto"`/`"windows"`/`"kde"`) to force
+  `platform_base.get_platform()`'s backend selection instead of relying on
+  `sys.platform`/`XDG_CURRENT_DESKTOP` sniffing — for a Plasma session where that
+  detection is unreliable, or for testing.
 
 ## [2.1.0] — 2026-07-17 — GeoJSON overlays and a raw-data source
 

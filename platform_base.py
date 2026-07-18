@@ -18,10 +18,11 @@
 applying the wallpaper, screen/monitor geometry, taskbar/dock avoidance, and
 power/network state for the fallback logic in the main script.
 
-To port to a new OS: implement WallpaperPlatform below (platform_windows.py is the
-reference implementation — every method there was validated against real hardware) in
-a new platform_<name>.py, and add a branch in get_platform(). Linux and macOS backends
-are both wanted, no specific desktop environment prioritized over another.
+To port to a new OS: implement WallpaperPlatform below (platform_windows.py and
+platform_linux_kde.py are the reference implementations — every method in each was
+validated against real hardware, see their own docstrings) in a new
+platform_<name>.py, and add a branch in get_platform(). A backend for any other OS or
+desktop environment (GNOME, macOS, etc.) is welcome — none prioritized over another.
 
 Note: this module (and any platform_*.py) must never import from goes_wallpaper.py —
 goes_wallpaper.py already imports from here, so the reverse would be circular.
@@ -133,11 +134,27 @@ class WallpaperPlatform(ABC):
         this path not existing (falls back to Pillow's built-in default font)."""
 
 
-def get_platform() -> WallpaperPlatform:
-    """Construct the backend for the current OS. Takes no arguments deliberately —
-    per-call behavior (like whether to use fallback screen-size detection) belongs on
-    the relevant WallpaperPlatform method instead, not baked into construction, so
-    this factory stays generic rather than accumulating one backend's config knobs."""
+def get_platform(override: str = "auto") -> WallpaperPlatform:
+    """Construct the backend for the current OS. `override` is deliberately the only
+    argument — per-call behavior (like whether to use fallback screen-size detection)
+    belongs on the relevant WallpaperPlatform method instead, not baked into
+    construction, so this factory doesn't accumulate one backend's config knobs.
+    `override` is an exception to that: it picks *which* backend, not how one
+    behaves, so it stays here rather than on any individual backend.
+
+    "auto" (default) preserves today's sys.platform/XDG_CURRENT_DESKTOP sniffing
+    below. An explicit "windows"/"kde" short-circuits that sniffing entirely --
+    for forcing a backend under a session where env-var detection is unreliable, or
+    for testing. Config.platform (goes_wallpaper.py) is validated against the same
+    set of names by validate_platform() before this is called, so an unrecognized
+    value never reaches here."""
+    if override == "windows":
+        from platform_windows import WindowsPlatform
+        return WindowsPlatform()
+    if override == "kde":
+        from platform_linux_kde import KDEPlatform
+        return KDEPlatform()
+
     if sys.platform == "win32":
         from platform_windows import WindowsPlatform
         return WindowsPlatform()
@@ -154,12 +171,14 @@ def get_platform() -> WallpaperPlatform:
             f"(XDG_CURRENT_DESKTOP={os.environ.get('XDG_CURRENT_DESKTOP')!r}) yet.\n"
             "Only KDE Plasma (platform_linux_kde.KDEPlatform) is implemented so far "
             "on Linux. To add another: implement platform_base.WallpaperPlatform in "
-            "a new platform_<name>.py and add a branch here."
+            "a new platform_<name>.py and add a branch here. Or, if this is actually "
+            "a KDE session that XDG_CURRENT_DESKTOP/XDG_SESSION_DESKTOP just didn't "
+            "identify correctly, set `platform = \"kde\"` in config.toml to force it."
         )
     raise NotImplementedError(
         f"No WallpaperPlatform backend for sys.platform={sys.platform!r} yet.\n"
         "To add one: implement platform_base.WallpaperPlatform (see "
-        "platform_windows.WindowsPlatform for a reference implementation) in a new "
-        "platform_<name>.py, and add a branch here. Linux and macOS backends are "
-        "both wanted, no specific desktop environment prioritized over another."
+        "platform_windows.WindowsPlatform or platform_linux_kde.KDEPlatform for "
+        "reference implementations) in a new platform_<name>.py, and add a branch "
+        "here."
     )

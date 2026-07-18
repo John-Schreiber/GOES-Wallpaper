@@ -355,3 +355,18 @@ class TestValidateOutputProjection:
             combos=(gw.Combo(name="a", crop_min_lon=-100.0, crop_min_lat=30.0, crop_max_lon=-90.0, crop_max_lat=40.0),),
         )
         gw.validate_output_projection(cfg)  # no raise
+
+
+class TestValidatePlatform:
+    def test_default_is_valid(self):
+        gw.validate_platform(gw.Config())  # no raise
+
+    def test_windows_is_valid(self):
+        gw.validate_platform(gw.Config(platform="windows"))  # no raise
+
+    def test_kde_is_valid(self):
+        gw.validate_platform(gw.Config(platform="kde"))  # no raise
+
+    def test_bogus_platform_raises(self):
+        with pytest.raises(ValueError, match="platform must be one of"):
+            gw.validate_platform(gw.Config(platform="bogus"))
