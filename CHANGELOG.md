@@ -5,24 +5,6 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
-- `overlay_geojson_files` — a list of local GeoJSON files (state/county borders, a
-  coastline layer, a fixed marker set) drawn as georeferenced overlays alongside
-  `overlay_graticule`/`overlay_cities`. Supports `Point`/`MultiPoint`/`LineString`/
-  `MultiLineString`/`Polygon`/`MultiPolygon`, with per-feature `properties.color`
-  overrides accepting an `[r, g, b]` list, a hex string, or any PIL named color (so
-  GeoJSON from geojson.io/GitHub's simplestyle-spec works as-is). The composited
-  layer is cached in `data_dir` as its own file per distinct (files, satellite, frame
-  size, style) combination, so combos spanning more than one satellite/resolution
-  each get their own cache entry instead of invalidating and overwriting each other's
-  every cycle — an unchanged config only pays the parse/project/draw cost once.
-- `overlay_shell_command` — an external command (argv list, no shell parsing) run
-  once per cycle whose stdout is parsed as GeoJSON and drawn the same way as
-  `overlay_geojson_files`, but never cached, for genuinely fresh data (live storm
-  tracks, fire perimeters, etc.). A non-zero exit code, timeout, or unparseable
-  stdout is logged and skipped rather than breaking the update cycle.
-- Point/MultiPoint features from either provider above can carry a `properties.name`
-  to draw a text label next to the marker, matching how `overlay_cities` labels a
-  city.
 - Georeferenced overlays (`overlay_graticule`, `overlay_cities`, `overlay_geojson_files`,
   `overlay_shell_command`) now work on the `cdn_jpg` path's Full Disk sector (`sector =
   "FD"`), not just CONUS. Full Disk's GEOS extent is fixed (unlike Mesoscale, which
@@ -53,6 +35,72 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   and `satpy_raw` (any sector, via its real per-frame georeferencing). See
   [PROJECTIONS.md](PROJECTIONS.md) for example renders of each. Pixels outside
   the visible hemisphere in `"orthographic"` render black.
+
+## [2.1.0] — 2026-07-17 — GeoJSON overlays and a raw-data source
+
+### Added
+- `overlay_geojson_files` — a list of local GeoJSON files (state/county borders, a
+  coastline layer, a fixed marker set) drawn as georeferenced overlays alongside
+  `overlay_graticule`/`overlay_cities`. Supports `Point`/`MultiPoint`/`LineString`/
+  `MultiLineString`/`Polygon`/`MultiPolygon`, with per-feature `properties.color`
+  overrides accepting an `[r, g, b]` list, a hex string, or any PIL named color (so
+  GeoJSON from geojson.io/GitHub's simplestyle-spec works as-is). The composited
+  layer is cached in `data_dir` as its own file per distinct (files, satellite, frame
+  size, style) combination, so combos spanning more than one satellite/resolution
+  each get their own cache entry instead of invalidating and overwriting each other's
+  every cycle — an unchanged config only pays the parse/project/draw cost once.
+- `overlay_shell_command` — an external command (argv list, no shell parsing) run
+  once per cycle whose stdout is parsed as GeoJSON and drawn the same way as
+  `overlay_geojson_files`, but never cached, for genuinely fresh data (live storm
+  tracks, fire perimeters, etc.). A non-zero exit code, timeout, or unparseable
+  stdout is logged and skipped rather than breaking the update cycle.
+- Point/MultiPoint features from either provider above can carry a `properties.name`
+  to draw a text label next to the marker, matching how `overlay_cities` labels a
+  city.
+- `source_kind = "satpy_raw"` — an opt-in source (behind the new `satpy-raw` install
+  extra) that fetches raw ABI L1b radiance bands directly from the public
+  `noaa-goes16`/`noaa-goes18`/`noaa-goes19` S3 buckets and composites a GeoColor-style
+  image locally with [satpy](https://satpy.readthedocs.io/), instead of fetching NOAA
+  STAR's pre-rendered JPG. No baked-in state lines/logo/fake city lights, and exposes
+  real projection/area info so georeferenced overlays work accurately on Full Disk and
+  Mesoscale sectors too, not just CONUS. Builds its own day/night blend — true-color by
+  day, a muted navy-to-pale-lavender Band 13 brightness-temperature mapping by night,
+  blended at the real per-pixel solar terminator — rather than relying on satpy's stock
+  `geo_color` composite. First cut: no automatic fallback to `cdn_jpg` and no
+  cross-cycle caching of downloaded bands, so it's meaningfully heavier on
+  bandwidth/compute — see the README's "Custom raw-data source (satpy_raw)" section
+  before enabling it on a tight `interval_minutes`.
+
+### Fixed
+- `source_kind = "satpy_raw"` leaked ~98MB (CONUS) / ~550MB (Full Disk) of raw band
+  files into `<data_dir>/satpy_raw_cache` every cycle, since each scan's filenames
+  are unique and nothing ever deleted the previous cycle's files — a 5-minute
+  `--loop` could leak tens of GB/day. `fetch_composite` now clears everything not
+  part of the current scan's selection before downloading it.
+- The info bar's satellite/sector/product text and capture-time text could overlap
+  and render as garbled, overlapping text — most visible on `satpy_raw`'s longer
+  product label (`GeoColor (satpy_raw)`) on a square Full Disk frame, where the bar
+  is proportionally taller relative to the available width than on a widescreen
+  CONUS crop. The font size now shrinks (down to a legibility floor) until both
+  texts fit without overlapping.
+- `state.json`/`wallpaper.json` (and the GeoJSON overlay cache sidecar) were
+  written with a bare `write_text`, so a crash or power loss mid-write could corrupt
+  them — silently discarding every learned publish-time phase and ETag on next
+  load. Both now write through a same-directory temp file + atomic `os.replace`.
+- Full Disk's largest tier (`10848x10848`, ~117.7M pixels) exceeded Pillow's default
+  `MAX_IMAGE_PIXELS` (~89.5M), logging a `DecompressionBombWarning` on every such
+  fetch. Raised to a bounded 130M that covers every known NOAA tier, rather than
+  disabled outright — the guard still does real work against a compromised or
+  misbehaving CDN.
+- `Ctrl-C` during `--loop` exited with a raw traceback (`KeyboardInterrupt` is a
+  `BaseException`, so it skipped both `run_loop`'s and `main()`'s `except
+  Exception` handlers). `main()` now catches it directly for a clean exit.
+- `data_dir`/`info_font_path` defaults were hardcoded to Windows paths
+  (`~/AppData/Local/...`, `C:\Windows\Fonts\...`) directly in the otherwise
+  cross-platform `Config`/`load_config`. `WallpaperPlatform` gained
+  `default_data_dir()`/`default_font_path()`, which `load_config` now prefers when
+  neither config.toml nor a CLI override sets them — a prerequisite for a future
+  Linux/macOS backend, which only needs to implement those two methods.
 
 ## [2.0.0] — 2026-07-16 — full modernization
 

@@ -2,6 +2,8 @@
 # Copyright (C) 2026 John-Schreiber
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+from pathlib import Path
+
 import pytest
 
 import goes_wallpaper as gw
@@ -11,6 +13,17 @@ def write_toml(tmp_path, text):
     p = tmp_path / "config.toml"
     p.write_text(text)
     return p
+
+
+class _FakePlatform:
+    """Duck-typed stub -- load_config only calls default_data_dir/default_font_path,
+    so no need to implement every WallpaperPlatform abstract method."""
+
+    def default_data_dir(self):
+        return Path("/platform-default-data-dir")
+
+    def default_font_path(self):
+        return "/platform/default/font.ttf"
 
 
 class TestLoadConfig:
@@ -44,6 +57,28 @@ class TestLoadConfig:
         p = write_toml(tmp_path, 'data_dir = "C:/somewhere"\n')
         cfg = gw.load_config(p, {})
         assert isinstance(cfg.data_dir, gw.Path)
+
+    def test_no_platform_keeps_config_class_defaults(self, tmp_path):
+        p = write_toml(tmp_path, "")
+        cfg = gw.load_config(p, {})
+        assert cfg.data_dir == gw.DEFAULT_DATA_DIR
+        assert cfg.info_font_path == r"C:\Windows\Fonts\segoeui.ttf"
+
+    def test_platform_supplies_defaults_when_unset(self, tmp_path):
+        p = write_toml(tmp_path, "")
+        cfg = gw.load_config(p, {}, platform=_FakePlatform())
+        assert cfg.data_dir == Path("/platform-default-data-dir")
+        assert cfg.info_font_path == "/platform/default/font.ttf"
+
+    def test_explicit_data_dir_wins_over_platform_default(self, tmp_path):
+        p = write_toml(tmp_path, 'data_dir = "C:/explicit"\n')
+        cfg = gw.load_config(p, {}, platform=_FakePlatform())
+        assert cfg.data_dir == Path("C:/explicit")
+
+    def test_cli_override_wins_over_platform_default(self, tmp_path):
+        p = write_toml(tmp_path, "")
+        cfg = gw.load_config(p, {"info_font_path": "/cli/font.ttf"}, platform=_FakePlatform())
+        assert cfg.info_font_path == "/cli/font.ttf"
 
     def test_retry_statuses_becomes_tuple(self, tmp_path):
         p = write_toml(tmp_path, "retry_statuses = [500, 502]\n")

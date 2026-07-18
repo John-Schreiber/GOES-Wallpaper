@@ -260,12 +260,16 @@ no-op here (no smaller-tier download exists for raw bands).
 
 **Status**: first cut, opt-in alongside the default `cdn_jpg` source (not a
 replacement) — no automatic fallback to `cdn_jpg` if a raw fetch fails, and no
-cross-cycle caching of downloaded band files (each cycle re-downloads into
-`<data_dir>/satpy_raw_cache`). Verified end to end against live GOES-18 data for
-both CONUS and Full Disk: real S3 listing/download, real compositing (including the
-day/night blend below, confirmed against a real terminator), and the full
-crop/info-block/EXIF pipeline producing a correct final image with no NOAA
+cross-cycle *reuse* of downloaded band files (each cycle fetches the latest scan
+fresh into `<data_dir>/satpy_raw_cache`; the previous cycle's files are deleted
+first, so this doesn't accumulate — see the disk-leak fix in
+[NEXT_STEPS.md](NEXT_STEPS.md)). Verified end to end against live GOES-18/GOES-19
+data for both CONUS and Full Disk: real S3 listing/download, real compositing
+(including the day/night blend below, confirmed against a real terminator), and the
+full crop/info-block/EXIF pipeline producing a correct final image with no NOAA
 annotations.
+
+![Sample GOES-19 Full Disk satpy_raw render, showing the day/night blend at a real terminator](sample_wallpaper_satpy_night.jpg)
 
 **Night side**: not GEOCOLOR-style synthetic city lights, by design (those come
 from a static VIIRS composite, not real-time data — see CUSTOM_IMAGERY_PLAN.md).

@@ -273,3 +273,9 @@ class WindowsPlatform(WallpaperPlatform):
             return cost_type in (NetworkCostType.FIXED, NetworkCostType.VARIABLE)
         except OSError:
             return None
+
+    def default_data_dir(self) -> Path:
+        return Path.home() / "AppData" / "Local" / "GOES-Wallpaper"
+
+    def default_font_path(self) -> str:
+        return r"C:\Windows\Fonts\segoeui.ttf"
