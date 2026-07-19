@@ -120,10 +120,22 @@ A few non-obvious things learned while building and testing this, not really
 
 ## Known gaps / follow-up
 
-1. **`--loop` mode has only been exercised for one real cycle** at a time — never a
-   long supervised run spanning several real sleep/wake cycles, to confirm the
+1. ~~**`--loop` mode has only been exercised for one real cycle** at a time — never
+   a long supervised run spanning several real sleep/wake cycles, to confirm the
    learned-phase scheduling converges over time and repeated cycles don't leak file
-   handles/sessions.
+   handles/sessions.~~ A multi-hour supervised `--loop` soak run (2026-07-16 through
+   2026-07-18) found and fixed one real bug: a freshly-learned capture phase could
+   still be ahead of `now` right after the cycle that learned it, causing
+   `compute_next_run` to re-target the *same* interval already serviced — a
+   spurious near-immediate re-poll (visible in `log.txt` as a ~1s sleep right after
+   a normal ~300s one). Fixed by flooring `compute_next_run` at one interval past
+   `state["last_capture_time_utc"]`; see `tests/test_scheduling.py`'s
+   `TestComputeNextRun.test_freshly_learned_phase_never_targets_the_interval_just_serviced`
+   and the CHANGELOG. No file-handle/session leaks observed over the run. One
+   separate, not-yet-explained observation from the same soak: a stretch where the
+   CDN kept returning `200`s with byte-identical content across ~8 minutes (not the
+   usual `304`) — plausibly an upstream NOAA CDN/satellite data gap rather than a
+   code bug, but not confirmed either way; worth another look if it recurs.
 2. **`trim_source_caption_frac = 0.02`** was measured from one CONUS/GEOCOLOR frame.
    It's a fixed fraction of height, which should scale reasonably with resolution,
    but hasn't been checked against Full Disk or Mesoscale sectors, which may render
@@ -156,12 +168,51 @@ A few non-obvious things learned while building and testing this, not really
    bundled offline dataset (no network dependency, another thing to vendor/maintain)
    vs. a geocoding API call (network dependency, rate limits, offline behavior needs
    deciding).
-8. **Configurable overlay icons** — `_build_geojson_layer` currently always draws a
-   plain circle marker for Point/MultiPoint features. Custom per-marker icons would
-   need an icon-path GeoJSON property (e.g. `properties.icon`, resolved the same way
-   `properties.color`/`properties.name` already are), image loading/caching, and
-   compositing at the projected pixel position (`Image.alpha_composite`, same
-   pattern `draw_graticule` uses).
+8. **Improve GeoJSON rendering: anti-aliasing, polygon fill, custom icons,
+   simplestyle-spec property names.** `_build_geojson_layer`/`_draw_lonlat_run`
+   (`goes_wallpaper.py`) draw everything with raw `PIL.ImageDraw` — hard-edged (no
+   anti-aliasing) lines/circles, and `Polygon`/`MultiPolygon` rings are drawn as
+   closed *outlines only* (`OVERLAYS.md`: "not filled, no fill-color config") since
+   `ImageDraw.polygon(fill=...)` can't correctly handle interior rings (holes) via
+   even-odd winding. Points draw a plain outlined circle (`draw_point`) — no custom
+   icon support. Four related pieces, best landed together since they touch the same
+   drawing code:
+   - **Library: add `aggdraw`** (wraps Anti-Grain Geometry, MIT, pip-installable,
+     draws directly onto PIL `Image` objects) for the rasterization step only — leave
+     the existing `pyproj`/`numpy` projection pipeline untouched (`lonlat_to_pixels`
+     is already validated against `pyresample` + landmark cities; nothing about it
+     needs to change). Swap the `ImageDraw.line`/`ellipse`/`polygon` calls in
+     `_build_geojson_layer`/`_draw_lonlat_run` for `aggdraw.Path` + `Draw.line`/
+     `ellipse` calls. Buys anti-aliased strokes and correct even-odd polygon fill in
+     one small dependency, instead of pulling in shapely/GDAL for a problem that's
+     really "PIL's rasterizer is too primitive," not "we need real vector geometry
+     ops."
+   - **Fill support**: add `fill`/`fill_opacity` to `GeoJSONSource`/`ShellSource`
+     (mirroring `color`/`opacity`), and honor `properties.fill`/
+     `properties.fill-opacity` per feature (see simplestyle note below). Draw each
+     `Polygon`'s rings as one `aggdraw.Path` with even-odd fill so interior rings
+     (e.g. a country polygon with a lake cut out) render as real holes, not solid
+     fill.
+   - **Custom icons for points**: add an `icon` field to `GeoJSONSource`/
+     `ShellSource` (a path to a small PNG) plus a per-feature `properties.icon`
+     override, resolved the same way `properties.color`/`properties.name` already
+     are (`_resolve_feature_color` is the pattern to follow). `draw_point` pastes the
+     icon via `Image.alpha_composite` at the projected pixel instead of/alongside
+     the current outlined-circle fallback when no icon is set. This absorbs the
+     older, narrower version of this item (icons only, no fill/anti-aliasing).
+   - **Styling: align property names with the Mapbox/GitHub simplestyle-spec**
+     (`stroke`/`stroke-width`/`stroke-opacity`/`fill`/`fill-opacity`/
+     `marker-color`/`marker-size`) instead of the current ad hoc `properties.color`.
+     `_resolve_feature_color`'s docstring already justifies parsing hex/named colors
+     specifically because that's "what geojson.io/simplestyle-spec actually emit"
+     (`goes_wallpaper.py:1441`) — this just finishes that alignment so GeoJSON
+     exported from geojson.io or similar tools works without hand-editing property
+     names. `marker-symbol` (a maki icon ID/single-char in the real spec) doesn't fit
+     an arbitrary-raster-icon use case, so keep the custom `icon`/`properties.icon`
+     path above as a deliberate extension beyond the spec rather than trying to
+     overload `marker-symbol`.
+   Independent of item 16 (per-combo overlays) and item 18 (area-aware overlays) —
+   can land before, after, or interleaved with either.
 9. ~~**Plugin interface for overlays**~~ Partially done: `geojson_sources`/
    `shell_sources` (`overlays.toml`, see `OVERLAYS.md`) are now repeatable, named,
    independently-styled lists — multiple static GeoJSON file sets and/or multiple
