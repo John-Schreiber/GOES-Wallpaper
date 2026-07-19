@@ -184,6 +184,25 @@ class TestValidateSourceKind:
         with pytest.raises(ValueError, match=r"combos\['a'\].source_kind must be one of"):
             gw.validate_source_kind(cfg)
 
+    def test_image_file_is_valid_with_image_path(self):
+        gw.validate_source_kind(gw.Config(source_kind="image_file", image_path="frame.png"))  # no raise
+
+    def test_image_file_without_image_path_raises(self):
+        with pytest.raises(ValueError, match='source_kind = "image_file" requires image_path'):
+            gw.validate_source_kind(gw.Config(source_kind="image_file"))
+
+    def test_combo_image_file_without_image_path_raises(self):
+        cfg = gw.Config(combos=(gw.Combo(name="a", source_kind="image_file"),))
+        with pytest.raises(ValueError, match=r"combos\['a'\]: source_kind = \"image_file\" requires image_path"):
+            gw.validate_source_kind(cfg)
+
+    def test_combo_image_file_falls_back_to_config_image_path(self):
+        cfg = gw.Config(
+            source_kind="image_file", image_path="frame.png",
+            combos=(gw.Combo(name="a", source_kind="image_file"),),
+        )
+        gw.validate_source_kind(cfg)  # no raise -- combo inherits cfg.image_path
+
 
 class TestValidateLonlatCropBounds:
     def test_default_is_valid(self):

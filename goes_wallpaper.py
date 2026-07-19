@@ -51,11 +51,11 @@ from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 
 import numpy as np
 import requests
-from PIL import Image, ImageColor, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFont, UnidentifiedImageError
 from pyproj import CRS, Transformer
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -109,7 +109,10 @@ class Combo:
     sector: str | None = None
     product: str | None = None
     resolution: str | None = None
-    source_kind: str | None = None  # "cdn_jpg" | "satpy_raw"; falls back to Config.source_kind
+    source_kind: str | None = None  # "cdn_jpg" | "satpy_raw" | "image_file"; falls back to Config.source_kind
+    # Local path or http(s) URL to open directly, for source_kind = "image_file";
+    # meaningless (and ignored) for the other two kinds. See Config.image_path.
+    image_path: str | None = None
     crop_left: float = 0.0
     crop_top: float = 0.0
     crop_right: float = 1.0
@@ -212,7 +215,19 @@ class Config:
     # equivalent). Meaningfully heavier per cycle than cdn_jpg — see README.md's
     # "Custom raw-data source (satpy_raw)" section before enabling on a `--loop`.
     # See CUSTOM_IMAGERY_PLAN.md for the full design rationale.
+    #
+    # "image_file": open any Pillow-decodable image directly from image_path (a
+    # local filesystem path or an http(s) URL) instead of fetching from NOAA/AWS at
+    # all -- e.g. your own already-georeferenced imagery, or a one-off test frame.
+    # Unlike cdn_jpg's fetch, this never gates on content-type -- whatever Pillow's
+    # installed plugins can open is accepted, which includes plain TIFF/GeoTIFF
+    # pixel data. It does NOT parse GeoTIFF's embedded CRS/geotransform tags (that
+    # would need rasterio/GDAL, not attempted here) -- there's no georeferencing for
+    # this source_kind, so source_crop_min_lon/etc. and output_projection fall back
+    # to the plain fractional crop, same as an uncalibrated cdn_jpg sector.
     source_kind: str = "cdn_jpg"
+    # Required when source_kind = "image_file"; ignored otherwise. See above.
+    image_path: str | None = None
 
     # Which platform_base.WallpaperPlatform backend to use. "auto" (default)
     # detects from sys.platform / XDG_CURRENT_DESKTOP, same as always -- explicit
@@ -589,18 +604,23 @@ def validate_combos(cfg: Config) -> None:
             raise ValueError(f"combo `monitor` indices must be unique: {monitor_indices}")
 
 
-_VALID_SOURCE_KINDS = {"cdn_jpg", "satpy_raw"}
+_VALID_SOURCE_KINDS = {"cdn_jpg", "satpy_raw", "image_file"}
 
 
 def validate_source_kind(cfg: Config) -> None:
     if cfg.source_kind not in _VALID_SOURCE_KINDS:
         raise ValueError(f"source_kind must be one of {sorted(_VALID_SOURCE_KINDS)}, got {cfg.source_kind!r}")
+    if cfg.source_kind == "image_file" and not cfg.image_path:
+        raise ValueError('source_kind = "image_file" requires image_path to be set')
     for combo in cfg.combos:
+        kind = combo.source_kind or cfg.source_kind
         if combo.source_kind is not None and combo.source_kind not in _VALID_SOURCE_KINDS:
             raise ValueError(
                 f"combos[{combo.name!r}].source_kind must be one of {sorted(_VALID_SOURCE_KINDS)}, "
                 f"got {combo.source_kind!r}"
             )
+        if kind == "image_file" and not (combo.image_path or cfg.image_path):
+            raise ValueError(f'combos[{combo.name!r}]: source_kind = "image_file" requires image_path to be set')
 
 
 def _check_lonlat_bounds(label: str, min_lon: float | None, min_lat: float | None, max_lon: float | None, max_lat: float | None) -> None:
@@ -698,6 +718,7 @@ class EffectiveSource:
     product: str
     resolution: str
     source_kind: str
+    image_path: str | None
     crop_left: float
     crop_top: float
     crop_right: float
@@ -716,10 +737,13 @@ class EffectiveSource:
         """Identifies this exact source for per-source state (ETag/capture-time/
         learned publish phase), so unrelated sources sharing one config never mix up
         each other's freshness tracking. `product`/`resolution` are meaningless for
-        satpy_raw (no NOAA product code or JPG size tier), so they're left out of its
-        key rather than embedding whatever unrelated cfg defaults happen to be set."""
+        satpy_raw (no NOAA product code or JPG size tier) and for image_file (no
+        satellite/sector/product at all), so they're left out of those keys rather
+        than embedding whatever unrelated cfg defaults happen to be set."""
         if self.source_kind == "satpy_raw":
             return f"{self.satellite}/{self.sector}/satpy_raw"
+        if self.source_kind == "image_file":
+            return f"image_file/{self.image_path}"
         return f"{self.satellite}/{self.sector}/{self.product}/{self.resolution}"
 
     def satellite_label(self) -> str:
@@ -738,6 +762,7 @@ def resolve_source(cfg: Config, combo: Combo | None) -> EffectiveSource:
             product=cfg.product,
             resolution=cfg.resolution,
             source_kind=cfg.source_kind,
+            image_path=cfg.image_path,
             crop_left=cfg.source_crop_left,
             crop_top=cfg.source_crop_top,
             crop_right=cfg.source_crop_right,
@@ -754,6 +779,7 @@ def resolve_source(cfg: Config, combo: Combo | None) -> EffectiveSource:
         product=combo.product or cfg.product,
         resolution=combo.resolution or cfg.resolution,
         source_kind=combo.source_kind or cfg.source_kind,
+        image_path=combo.image_path or cfg.image_path,
         crop_left=combo.crop_left,
         crop_top=combo.crop_top,
         crop_right=combo.crop_right,
@@ -959,6 +985,30 @@ def fetch_image(cfg: Config, session: requests.Session, url: str, prev_etag: str
     return resp.content, headers
 
 
+def load_image_file_bytes(
+    cfg: Config, session: requests.Session, path_or_url: str, prev_etag: str | None,
+) -> tuple[bytes, dict[str, str]] | None:
+    """Generic byte-fetch for source_kind = "image_file": a local filesystem path or
+    an http(s):// URL. Unlike fetch_image (cdn_jpg's own JPEG sanity check), this
+    never gates on content-type -- decoding is left entirely to whatever Pillow's
+    installed plugins support. Returns None if unchanged: a 304 for a URL (ETag,
+    same mechanism as cdn_jpg), or a local file whose mtime matches prev_etag (there's
+    no HTTP layer to hand out a real ETag, so the file's mtime_ns is reused as one)."""
+    if path_or_url.startswith(("http://", "https://")):
+        headers = {"If-None-Match": prev_etag} if prev_etag else {}
+        resp = session.get(path_or_url, headers=headers, timeout=(cfg.timeout_connect, cfg.timeout_read))
+        if resp.status_code == 304:
+            return None
+        resp.raise_for_status()
+        return resp.content, {k.lower(): v for k, v in resp.headers.items()}
+
+    path = Path(path_or_url)
+    mtime_etag = str(path.stat().st_mtime_ns)
+    if prev_etag == mtime_etag:
+        return None
+    return path.read_bytes(), {"etag": mtime_etag}
+
+
 def parse_capture_time(headers: dict[str, str]) -> str | None:
     """Parse the source frame's actual capture time from the HTTP Last-Modified header."""
     last_modified = headers.get("last-modified")
@@ -1146,6 +1196,17 @@ class AreaInfo:
     EffectiveSource."""
     proj4_params: dict[str, Any]
     extent: tuple[float, float, float, float]
+
+
+def _has_georeferencing(source: EffectiveSource, area: AreaInfo | None) -> bool:
+    """Whether *any* georeferencing -- real (`area`, currently only satpy_raw) or
+    hand-calibrated (_GEOS_AREA_BY_SECTOR, cdn_jpg only) -- is available for this
+    frame. The hand-calibrated CONUS/Full Disk table was only ever validated against
+    NOAA's own cdn_jpg rendering; a source_kind that also lacks `area` (e.g.
+    image_file, an arbitrary Pillow-decodable image) must not silently inherit it
+    just because its satellite/sector happen to match the calibrated defaults
+    (GOES19/CONUS) -- see draw_overlays/render_frame, the only callers."""
+    return area is not None or source.source_kind == "cdn_jpg"
 
 
 _area_info_transformers: dict[tuple[float, ...], Transformer] = {}
@@ -1736,6 +1797,13 @@ def draw_overlays(img: Image.Image, cfg: Config, overlays: OverlaysConfig, sourc
     if not (overlays.graticule.enabled or overlays.geojson_sources or overlays.shell_sources):
         return img
     if area is None:
+        if not _has_georeferencing(source, area):
+            logging.warning(
+                "[%s] Georeferenced overlays require either a real per-frame area "
+                "(satpy_raw) or a calibrated cdn_jpg sector; source_kind=%s has "
+                "neither; skipping", source.name, source.source_kind,
+            )
+            return img
         calibration = _GEOS_AREA_BY_SECTOR.get(source.sector)
         if calibration is None:
             logging.warning(
@@ -1796,6 +1864,48 @@ class FetchedFrame:
     extra_meta: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class FrameSource:
+    """One pluggable way to obtain a FetchedFrame. See the _SOURCES registry below
+    (defined after the three fetch functions it wraps, near the bottom of the
+    file) -- adding a new source_kind means writing one fetch function + one entry
+    there, not touching build_metadata/fetch_frame/render_frame's bodies, the way
+    a fourth `if source.source_kind == ...` branch would have."""
+    fetch: Callable[[Config, requests.Session, EffectiveSource, dict[str, Any]], FetchedFrame | None]
+    describe: Callable[[EffectiveSource, FetchedFrame], dict[str, Any]]
+    strips_baked_caption: bool = False  # NOAA's own caption strip -- a cdn_jpg-only artifact
+    tracks_etag: bool = False  # persist frame.extra_meta["etag"] into sstate["etag"] each cycle
+
+
+def _describe_cdn_jpg(source: EffectiveSource, frame: FetchedFrame) -> dict[str, Any]:
+    return {
+        "product": source.product,
+        "resolution_requested": source.resolution,
+        "source_url": source.image_url,
+        "http_last_modified": frame.extra_meta.get("last-modified"),
+        "http_etag": frame.extra_meta.get("etag"),
+        "http_content_length": frame.extra_meta.get("content-length"),
+    }
+
+
+def _describe_satpy_raw(source: EffectiveSource, frame: FetchedFrame) -> dict[str, Any]:
+    return {
+        "product": "GeoColor (satpy_raw)",
+        "resolution_requested": "native",
+        "source_url": "s3://" + ", ".join(frame.extra_meta.get("band_files", [])),
+        "download_bytes": frame.extra_meta.get("total_bytes"),
+    }
+
+
+def _describe_image_file(source: EffectiveSource, frame: FetchedFrame) -> dict[str, Any]:
+    return {
+        "product": "image_file",
+        "resolution_requested": "native",
+        "source_url": source.image_path,
+        "http_etag": frame.extra_meta.get("etag"),
+    }
+
+
 def build_metadata(source: EffectiveSource, frame: FetchedFrame) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
 
@@ -1805,21 +1915,12 @@ def build_metadata(source: EffectiveSource, frame: FetchedFrame) -> dict[str, An
         "satellite_label": source.satellite_label(),
         "sector": source.sector,
         "sector_label": source.sector_label(),
-        "product": source.product if frame.source_kind == "cdn_jpg" else "GeoColor (satpy_raw)",
-        "resolution_requested": source.resolution if frame.source_kind == "cdn_jpg" else "native",
         "downloaded_at_utc": now.isoformat(),
         "capture_time_utc": frame.capture_time_utc,
         "image_dimensions": list(frame.image.size),
         "image_format": frame.image.format,
     }
-    if frame.source_kind == "cdn_jpg":
-        meta["source_url"] = source.image_url
-        meta["http_last_modified"] = frame.extra_meta.get("last-modified")
-        meta["http_etag"] = frame.extra_meta.get("etag")
-        meta["http_content_length"] = frame.extra_meta.get("content-length")
-    else:
-        meta["source_url"] = "s3://" + ", ".join(frame.extra_meta.get("band_files", []))
-        meta["download_bytes"] = frame.extra_meta.get("total_bytes")
+    meta.update(_SOURCES[frame.source_kind].describe(source, frame))
     return meta
 
 
@@ -2076,46 +2177,118 @@ def _fetch_satpy_raw(cfg: Config, source: EffectiveSource, sstate: dict[str, Any
     )
 
 
-def fetch_and_render(
+def _fetch_image_file(
+    cfg: Config, session: requests.Session, source: EffectiveSource, sstate: dict[str, Any],
+) -> FetchedFrame | None:
+    """source_kind = "image_file": open any Pillow-decodable image directly from a
+    local path or http(s) URL (source.image_path) -- no NOAA/AWS fetch involved.
+    No AreaInfo is produced (no CRS/geotransform parsing -- see Config.image_path's
+    docstring), so this frame falls back to the plain fractional crop downstream."""
+    if not source.image_path:
+        raise ValueError('source_kind = "image_file" requires image_path to be set')
+
+    prev_etag = sstate.get("etag") if cfg.skip_if_unchanged else None
+    started = time.monotonic()
+    result = load_image_file_bytes(cfg, session, source.image_path, prev_etag)
+    elapsed = time.monotonic() - started
+    if result is None:
+        logging.info("[%s] No new image_file content available", source.name)
+        return None
+
+    content, headers = result
+    logging.info("[%s] Loaded %d bytes from %s in %.2fs", source.name, len(content), source.image_path, elapsed)
+
+    try:
+        img = Image.open(io.BytesIO(content))
+        img.load()
+    except UnidentifiedImageError as e:
+        raise ValueError(f"Could not decode {source.image_path!r} as an image: {e}") from e
+
+    return FetchedFrame(
+        image=img,
+        capture_time_utc=parse_capture_time(headers) if "last-modified" in headers else None,
+        source_kind="image_file",
+        extra_meta=headers,
+    )
+
+
+# Registry of fetch functions -- adding a new source_kind means writing one fetch
+# function above + one entry here, not touching fetch_frame/build_metadata/
+# render_frame's bodies. See FrameSource's docstring.
+_SOURCES: dict[str, FrameSource] = {
+    "cdn_jpg": FrameSource(
+        fetch=_fetch_cdn_jpg, describe=_describe_cdn_jpg,
+        strips_baked_caption=True, tracks_etag=True,
+    ),
+    "satpy_raw": FrameSource(
+        fetch=lambda cfg, session, source, sstate: _fetch_satpy_raw(cfg, source, sstate),
+        describe=_describe_satpy_raw,
+    ),
+    "image_file": FrameSource(
+        fetch=_fetch_image_file, describe=_describe_image_file, tracks_etag=True,
+    ),
+}
+
+
+def fetch_frame(
+    cfg: Config, session: requests.Session, source: EffectiveSource, state: dict[str, Any],
+) -> FetchedFrame | None:
+    """Pure fetch: network/disk I/O + decode for one EffectiveSource, dispatched via
+    the _SOURCES registry. No overlays, crop, reprojection, info-block, or EXIF --
+    see render_frame for that. Returns None if the source genuinely hasn't changed
+    (a cdn_jpg/image_file 304-or-mtime-unchanged, or the satpy_raw equivalent -- same
+    scan time as last cycle). Does not itself mutate state -- render_frame does, once
+    it knows the frame survived all the way to a rendered result. Callers that want
+    Config.metered_resolution applied (fetch_and_render does) must call
+    maybe_apply_metered_resolution on `source` themselves first -- it's not done
+    here, so the exact same (possibly resolution-downgraded) source can be reused
+    for render_frame's metadata without redoing/duplicating that decision."""
+    sstate = state.setdefault("sources", {}).setdefault(source.key, {})
+    try:
+        registered = _SOURCES[source.source_kind]
+    except KeyError:
+        raise ValueError(f"Unknown source_kind: {source.source_kind!r}") from None
+    return registered.fetch(cfg, session, source, sstate)
+
+
+def render_frame(
     cfg: Config,
     overlays: OverlaysConfig,
-    session: requests.Session,
     source: EffectiveSource,
+    frame: FetchedFrame,
     state: dict[str, Any],
     screen_size: tuple[int, int],
     platform: WallpaperPlatform,
-) -> tuple[Image.Image, dict[str, Any]] | None:
-    """Fetch (with freshness retry), decode, and fully render one EffectiveSource's
-    frame into a screen_size-sized final image + its metadata. Updates state in place
+) -> tuple[Image.Image, dict[str, Any]]:
+    """Pure render: overlays, caption trim, reprojection/crop, info block, EXIF --
+    takes a FetchedFrame from anywhere (fetch_frame, a local file, a test fixture)
+    with zero knowledge of how it was obtained. Also updates state in place
     (per-source ETag/capture-time/learned publish phase, keyed by source.key so
     unrelated sources sharing one config never mix up each other's freshness
-    tracking). Returns None if the source genuinely hasn't changed (a cdn_jpg 304, or
-    the satpy_raw equivalent -- same scan time as last cycle)."""
-    source = maybe_apply_metered_resolution(cfg, source, platform)
+    tracking) now that the frame is confirmed to be rendered successfully."""
     sstate = state.setdefault("sources", {}).setdefault(source.key, {})
     prev_capture_time = sstate.get("last_capture_time_utc")
-
-    if source.source_kind == "cdn_jpg":
-        frame = _fetch_cdn_jpg(cfg, session, source, sstate)
-    elif source.source_kind == "satpy_raw":
-        frame = _fetch_satpy_raw(cfg, source, sstate)
-    else:
-        raise ValueError(f"Unknown source_kind: {source.source_kind!r}")
-    if frame is None:
-        return None
+    registered = _SOURCES[frame.source_kind]
 
     with frame.image as img:
         meta = build_metadata(source, frame)
 
         img = draw_overlays(img, cfg, overlays, source, frame.area_info)
 
-        # NOAA's baked caption strip is a cdn_jpg-only artifact -- a satpy_raw
-        # composite never has one to trim.
-        if source.source_kind == "cdn_jpg" and cfg.trim_source_caption:
+        if registered.strips_baked_caption and cfg.trim_source_caption:
             img = trim_source_caption(img, cfg.trim_source_caption_frac)
 
+        has_georeferencing = _has_georeferencing(source, frame.area_info)
+
         did_reproject = False
-        if cfg.output_projection != "native":
+        if cfg.output_projection != "native" and not has_georeferencing:
+            logging.warning(
+                "[%s] output_projection requires either a real per-frame area "
+                "(satpy_raw) or a calibrated cdn_jpg sector; source_kind=%s has "
+                "neither -- output_projection skipped, using the native projection",
+                source.name, source.source_kind,
+            )
+        elif cfg.output_projection != "native":
             center_lon = cfg.output_projection_center_lon
             if center_lon is None:
                 center_lon = _satellite_lon_0(source.satellite, source.sector, frame.area_info) or 0.0
@@ -2151,7 +2324,14 @@ def fetch_and_render(
             # The reprojection's own bounds/framing already is the crop when it ran --
             # only apply the region-of-interest crop on top of the native projection.
             crop_box = (source.crop_left, source.crop_top, source.crop_right, source.crop_bottom)
-            if source.crop_min_lon is not None:
+            if source.crop_min_lon is not None and not has_georeferencing:
+                logging.warning(
+                    "[%s] source_crop_min_lon/etc. require either a real per-frame area "
+                    "(satpy_raw) or a calibrated cdn_jpg sector; source_kind=%s has "
+                    "neither -- falling back to the fractional crop",
+                    source.name, source.source_kind,
+                )
+            elif source.crop_min_lon is not None:
                 lonlat_box = lonlat_box_to_crop_fraction(
                     source.satellite, source.sector, frame.area_info, *img.size,
                     source.crop_min_lon, source.crop_min_lat, source.crop_max_lon, source.crop_max_lat,
@@ -2175,7 +2355,7 @@ def fetch_and_render(
 
         img = embed_exif(img, meta)
 
-    if source.source_kind == "cdn_jpg":
+    if registered.tracks_etag:
         sstate["etag"] = frame.extra_meta.get("etag")
     if meta["capture_time_utc"]:
         if meta["capture_time_utc"] != prev_capture_time:
@@ -2183,6 +2363,30 @@ def fetch_and_render(
         sstate["last_capture_time_utc"] = meta["capture_time_utc"]
 
     return img, meta
+
+
+def fetch_and_render(
+    cfg: Config,
+    overlays: OverlaysConfig,
+    session: requests.Session,
+    source: EffectiveSource,
+    state: dict[str, Any],
+    screen_size: tuple[int, int],
+    platform: WallpaperPlatform,
+) -> tuple[Image.Image, dict[str, Any]] | None:
+    """Fetch (with freshness retry) + fully render one EffectiveSource's frame into a
+    screen_size-sized final image + its metadata -- see fetch_frame/render_frame for
+    the two stages this composes. Kept as a single entry point since every existing
+    caller (run_once/run_once_rotate/run_once_per_monitor) just wants both stages
+    back-to-back; call fetch_frame/render_frame directly if you need the decoded
+    frame without rendering it (e.g. inspecting a frame before committing to a
+    render), or to render a FetchedFrame that didn't come from a network/disk fetch
+    at all."""
+    source = maybe_apply_metered_resolution(cfg, source, platform)
+    frame = fetch_frame(cfg, session, source, state)
+    if frame is None:
+        return None
+    return render_frame(cfg, overlays, source, frame, state, screen_size, platform)
 
 
 def _write_render_to(path: Path, img: Image.Image, label: str = "") -> None:
