@@ -124,6 +124,13 @@ fresh data (live storm tracks, fire perimeters). A non-zero exit code, a
 timeout, or unparseable stdout is logged and skipped rather than breaking the
 update cycle; one broken source doesn't block others.
 
+**Security note:** `command` is a code-execution surface by design — it runs
+whatever argv you configure, every cycle. That's the feature working as
+intended (there's no sandboxing), but it means `overlays.toml` (like
+`config.toml`) must never be pointed at an untrusted file via `--config`/
+`--overlays-config`, and neither file should be writable by less-privileged
+users than whoever runs `goes_wallpaper`.
+
 ## GeoJSON styling rules
 
 Both `geojson_sources` and `shell_sources` draw through the same shared code
