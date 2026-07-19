@@ -60,7 +60,7 @@ goes-wallpaper --config path\to\config.toml
 ```
 
 (Same command on every OS/shell. Pin a specific release instead of tracking
-`main` by appending a tag, e.g. `...GOES-Wallpaper@v2.2.0`.) This installs two
+`main` by appending a tag, e.g. `...GOES-Wallpaper@v2.3.0`.) This installs two
 entry points: `goes-wallpaper` (console) and `goes-wallpaperw` (no console
 popup — for a Task Scheduler/shortcut-style launch). An installed copy has no
 `config.toml` next to it, unlike a source checkout — pass `--config`

@@ -2,9 +2,18 @@
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [2.3.0] — 2026-07-19 — overlays.toml, image_file source, lock screen, hardening
 
 ### Added
+- `source_kind = "image_file"` — open any Pillow-decodable image directly from
+  `image_path` (a local filesystem path or an http(s) URL) instead of fetching from
+  NOAA/AWS at all, e.g. your own already-georeferenced imagery or a one-off test
+  frame. No content-type gating, so plain TIFF/GeoTIFF pixel data works too, but
+  there's no CRS/geotransform parsing — `source_crop_min_lon`/etc. and
+  `output_projection` fall back to the plain fractional crop, same as an
+  uncalibrated `cdn_jpg` sector. Change-detection reuses the source file's mtime as
+  a synthetic ETag for a local path, or a real one for a URL. See README's source
+  kinds list and `Config.image_path`/`Combo.image_path`.
 - **`set_lock_screen`** — also apply the rendered image as the lock screen image,
   not just the desktop wallpaper. Opt-in (default off), supported on Windows (via
   WinRT's `LockScreen.SetImageFileAsync()`, confirmed working from a plain
@@ -78,6 +87,43 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `state["last_capture_time_utc"]` (already recorded every successful cycle), so a
   freshly-learned phase always targets the next interval, never the one just
   consumed.
+- Georeferenced overlays' hand-calibrated CONUS/Full Disk lookup was gated on "no
+  `AreaInfo`" rather than "`cdn_jpg` specifically" — a latent bug surfaced while
+  adding `image_file` above, since an area-less source at the default
+  GOES19/CONUS settings would have silently inherited real satellite calibration
+  it was never validated against for lon/lat cropping, overlays, and
+  reprojection. `_has_georeferencing()` now gates that fallback correctly, and an
+  area-less, non-`cdn_jpg` source just skips overlays with a logged warning
+  instead.
+
+### Security hardening
+- `overlay_shell_command`'s stdout/stderr were read via `subprocess.run`'s
+  unbounded `capture_output=True`, so a runaway or malicious provider process
+  could exhaust memory well before its `timeout` fired. `fetch_shell_geojson` now
+  reads both streams on background threads via `_read_stream_capped`, each capped
+  at 16 MiB; exceeding the cap kills the process and discards the result instead
+  of buffering it all.
+- `platform_windows._query_wmi_resolution` invoked `powershell` by bare name,
+  trusting `PATH` to resolve it to the real executable. Now resolves
+  `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` by absolute path.
+- `ci.yml`/`release.yml` now pin `actions/checkout`/`astral-sh/setup-uv` by commit
+  SHA (with the version as a trailing comment) instead of a mutable tag, so a
+  compromised or force-pushed tag can't swap in unreviewed action code.
+- [OVERLAYS.md](OVERLAYS.md)'s `[[shell_sources]]` section now documents that
+  `command` is a code-execution surface by design — `--config`/
+  `--overlays-config` must never point at an untrusted file, and neither file
+  should be writable by less-privileged users than whoever runs
+  `goes_wallpaper`. Closes out the remaining items in `NEXT_STEPS.md`'s security
+  notes.
+
+### Changed — internal: fetch/render split
+
+`fetch_and_render` is now two functions, `fetch_frame` (network/disk I/O and
+decode) and `render_frame` (overlays, crop, reprojection, info block, EXIF),
+joined by a `_SOURCES` registry keyed on `source_kind`. Adding a new source kind
+(as `image_file` did above) is one fetch function plus one registry entry now,
+instead of touching several scattered `if`/`elif` branches across the module. No
+behavior change for `cdn_jpg`/`satpy_raw`.
 
 ### Changed — BREAKING: overlays moved out of config.toml
 

@@ -1,8 +1,11 @@
 # Running periodically
 
 Pick one option, not both — running the built-in `--loop` mode alongside an OS
-scheduler means they'll fight over the same `wallpaper.jpg`/`state.json` and
-double the request rate to NOAA's CDN.
+scheduler doubles the request rate to NOAA's CDN, and a second instance started
+while the first is still running exits immediately with an error rather than
+racing it for the same `wallpaper.jpg`/`state.json` (an OS-level advisory lock,
+`goes_wallpaper.lock` in `data_dir`, held for the process's lifetime and
+released automatically even on a crash).
 
 ## Option A: built-in `--loop` mode
 
