@@ -11,93 +11,17 @@ raw satellite data — a separate, bigger initiative than anything below — see
 `source_kind = "satpy_raw"`) has landed; see that doc for what's done vs. still
 open.
 
-## Suggested order of attack (as of 2026-07-16)
+## Security notes
 
-A recommended sequencing across the bug list and gap list below — not a commitment,
-just what looks highest-leverage first:
+The trust model is sound: fetches are HTTPS with `requests`' default TLS
+verification, the CDN response is content-type-checked before decoding,
+`overlay_shell_command` is argv-only (no shell parsing), and the release
+workflow's permissions are minimal (`contents: write` only). Worth addressing
+or keeping in mind:
 
-1. **Bug 1 (satpy_raw disk leak)** — the only thing here that actively damages a
-   user's machine over time; small fix, ship it first.
-2. **Bugs 2–4** (side-docked taskbar, rotate-mode phase, atomic state writes) —
-   each is a small, self-contained correctness fix; could be one PR.
-3. **Gap 1 (long supervised `--loop` soak run)** — do this *after* the fixes above
-   so the soak validates them too (the disk leak would have been caught by exactly
-   this kind of run).
-4. **Gap 15 → gap 9** (unify the overlay style config shape, then the
-   `[[overlay_plugins]]` registry) — 15 is explicitly preparatory for 9, and 9
-   unblocks gap 16 (per-combo overlays); doing them in that order avoids building
-   the registry on three duplicated field families.
-5. **Gap 11 + gap 17 (Linux backend + data_dir portability)** — the biggest
-   audience-widener; 17 is a prerequisite discovered in this review (the default
-   `data_dir` hardcodes Windows' AppData layout in the supposedly cross-platform
-   core).
-6. Everything else (lock screen on macOS -- Windows and KDE are done, see gap 13;
-   frozen exe, geocoding, icons) as interest dictates.
-
-## Bug fixes needed (2026-07-16 full-repo review)
-
-Found by code review of `goes_wallpaper.py`/`source_satpy.py`/`platform_windows.py`
-(all 162 tests passing at the time). Ordered by severity:
-
-1. ~~**`satpy_raw` band files accumulate forever in `satpy_raw_cache` — disk
-   leak.**~~ Done: `fetch_composite` now deletes every file in `work_dir` that isn't
-   part of the current scan's selection before downloading it, so peak usage stays
-   at roughly one cycle's worth instead of growing forever. Regression-tested in
-   `tests/test_source_satpy.py`.
-2. ~~**`avoid_taskbar` breaks for a side- or top-docked taskbar.**~~ Done:
-   `WindowsPlatform.get_taskbar_height()` now uses
-   `SHAppBarMessage(ABM_GETTASKBARPOS)` to read the taskbar's actual docked edge and
-   only applies a margin when it's at the bottom (0 otherwise), instead of reading
-   `Shell_TrayWnd`'s window rect height unconditionally (which for a side-docked
-   taskbar is the full screen height). Verified against this machine's real
-   (bottom-docked) taskbar and unit-tested for all four edges in
-   `tests/test_platform_windows.py` (mocked, like the rest of the platform backends'
-   edge-case coverage).
-3. ~~**`combo_mode = "rotate"` schedules the next wake-up from the wrong combo's
-   learned phase.**~~ Done: `run_loop` now computes the phase from
-   `state["combo_rotation_index"]` (the *upcoming* combo, already advanced by
-   `run_once_rotate` before it saves state) via a new `_next_cycle_source_key`
-   helper, instead of `state["last_source_key"]` (the combo *just* fetched).
-   Regression-tested in `tests/test_scheduling.py`.
-4. ~~**`state.json`/`wallpaper.json` writes aren't atomic.**~~ Done: both, plus the
-   GeoJSON overlay cache sidecar, now go through a shared `_atomic_write_text`
-   (write to a same-directory temp file, then `os.replace`).
-5. ~~**Full Disk at `10848x10848` trips Pillow's decompression-bomb warning every
-   cycle.**~~ Done: `Image.MAX_IMAGE_PIXELS` is now raised to 130M at module load,
-   with a comment on why it's bounded rather than disabled.
-6. ~~**Ctrl-C in `--loop` exits with a raw traceback.**~~ Done: `main()` now catches
-   `KeyboardInterrupt` separately and exits with code 130 instead of a traceback.
-
-## Security notes (2026-07-16 review)
-
-No high-severity issues found. The trust model is sound: fetches are HTTPS with
-`requests`' default TLS verification, the CDN response is content-type-checked
-before decoding, `overlay_shell_command` is argv-only (no shell parsing), and the
-release workflow's permissions are minimal (`contents: write` only). Worth
-addressing or keeping in mind:
-
-- ~~**`config.toml` is a code-execution surface by design**~~ Done: `OVERLAYS.md`'s
-  `[[shell_sources]]` section now has a "Security note" spelling out that `command`
-  runs whatever argv is configured every cycle, so `--config`/`--overlays-config`
-  must never point at an untrusted file and neither file should be writable by
-  less-privileged users.
-- ~~**`_query_wmi_resolution` invokes `powershell` by bare name**~~ Done:
-  `platform_windows.py._query_wmi_resolution` now resolves
-  `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` explicitly instead of
-  relying on a PATH lookup.
 - **Pillow decodes untrusted network bytes every cycle** — keep Pillow current
-  (`uv.lock` pins it; `uv lock --upgrade-package pillow` periodically), and keep the
-  decompression-bomb guard enabled when fixing bug 5 above.
-- ~~**`overlay_shell_command` stdout is read unbounded**~~ Done:
-  `goes_wallpaper.fetch_shell_geojson` now reads stdout/stderr on background threads
-  via `_read_stream_capped`, each capped at `_OVERLAY_SHELL_MAX_OUTPUT_BYTES` (16
-  MiB); exceeding the cap kills the process and discards the result instead of
-  buffering it all in memory.
-- ~~**GitHub Actions are pinned by tag**~~ Done: `ci.yml`/`release.yml` now pin
-  `actions/checkout`/`astral-sh/setup-uv` by commit SHA (with the version as a
-  trailing comment) instead of a mutable tag.
-- ~~**`user_agent` still points at the upstream repo**~~ Done: now points at this
-  fork (`+https://github.com/John-Schreiber/GOES-Wallpaper`).
+  (`uv.lock` pins it; `uv lock --upgrade-package pillow` periodically), and keep
+  the decompression-bomb guard (`Image.MAX_IMAGE_PIXELS`) enabled.
 
 ## Verification notes worth knowing
 
@@ -121,22 +45,6 @@ A few non-obvious things learned while building and testing this, not really
 
 ## Known gaps / follow-up
 
-1. ~~**`--loop` mode has only been exercised for one real cycle** at a time — never
-   a long supervised run spanning several real sleep/wake cycles, to confirm the
-   learned-phase scheduling converges over time and repeated cycles don't leak file
-   handles/sessions.~~ A multi-hour supervised `--loop` soak run (2026-07-16 through
-   2026-07-18) found and fixed one real bug: a freshly-learned capture phase could
-   still be ahead of `now` right after the cycle that learned it, causing
-   `compute_next_run` to re-target the *same* interval already serviced — a
-   spurious near-immediate re-poll (visible in `log.txt` as a ~1s sleep right after
-   a normal ~300s one). Fixed by flooring `compute_next_run` at one interval past
-   `state["last_capture_time_utc"]`; see `tests/test_scheduling.py`'s
-   `TestComputeNextRun.test_freshly_learned_phase_never_targets_the_interval_just_serviced`
-   and the CHANGELOG. No file-handle/session leaks observed over the run. One
-   separate, not-yet-explained observation from the same soak: a stretch where the
-   CDN kept returning `200`s with byte-identical content across ~8 minutes (not the
-   usual `304`) — plausibly an upstream NOAA CDN/satellite data gap rather than a
-   code bug, but not confirmed either way; worth another look if it recurs.
 2. **`trim_source_caption_frac = 0.02`** was measured from one CONUS/GEOCOLOR frame.
    It's a fixed fraction of height, which should scale reasonably with resolution,
    but hasn't been checked against Full Disk or Mesoscale sectors, which may render
@@ -153,16 +61,6 @@ A few non-obvious things learned while building and testing this, not really
    and doesn't use capture-time-sync scheduling (no single "the" source to learn a
    phase from when several are fetched per cycle — falls back to plain
    clock-boundary alignment). Worth revisiting if precise timing matters here too.
-5. ~~**`CUSTOM_IMAGERY_PLAN.md`'s Option B (satpy raw-composite) is explicitly
-   deferred**, not abandoned.~~ Done: its first cut (`source_kind = "satpy_raw"`)
-   has landed — see that doc's status section for what's verified vs. still open
-   (sustained-`--loop` bandwidth/compute cost, the B/A hybrid fallback, real VIIRS
-   night-lights).
-6. ~~**Overlay line support** (not just points/markers).~~ Done:
-   `overlay_shell_command`/`overlay_geojson_files` + `_build_geojson_layer`
-   (`goes_wallpaper.py`) draw `LineString`/`Polygon`/`Multi*` GeoJSON features
-   (state/county borders, storm tracks, fire perimeters), not just points, via the
-   same `lonlat_to_pixels()` projection `draw_graticule` uses.
 7. **API/tool for lat/lon lookup** — city markers (`overlays/cities.geojson`, a
    `geojson_sources` entry — see `OVERLAYS.md`) need `lon`/`lat` typed in by hand. A
    geocoding lookup would remove that friction. Needs a data-source decision:
@@ -170,7 +68,9 @@ A few non-obvious things learned while building and testing this, not really
    vs. a geocoding API call (network dependency, rate limits, offline behavior needs
    deciding).
 8. **Improve GeoJSON rendering: anti-aliasing, polygon fill, custom icons,
-   simplestyle-spec property names.** `_build_geojson_layer`/`_draw_lonlat_run`
+   simplestyle-spec property names.** Tracked in
+   [issue #17](https://github.com/John-Schreiber/GOES-Wallpaper/issues/17).
+   `_build_geojson_layer`/`_draw_lonlat_run`
    (`goes_wallpaper.py`) draw everything with raw `PIL.ImageDraw` — hard-edged (no
    anti-aliasing) lines/circles, and `Polygon`/`MultiPolygon` rings are drawn as
    closed *outlines only* (`OVERLAYS.md`: "not filled, no fill-color config") since
@@ -226,17 +126,6 @@ A few non-obvious things learned while building and testing this, not really
    else. `OverlaysConfig`/`GeoJSONSource`/`ShellSource` (`goes_wallpaper.py`) are the
    landed shape; extending it with a third source *kind* (vs. more entries of the
    existing two kinds) is what remains of the original "plugin interface" framing.
-10. ~~**Reduce prebaked config settings/magic numbers.**~~ Done: the overlay-sizing
-    "reference width" scale factor is now the single `_OVERLAY_REFERENCE_WIDTH_PX`
-    constant (`goes_wallpaper.py`), shared by `draw_graticule` and
-    `_build_geojson_layer` instead of each hardcoding `w / 2000` independently; the info
-    bar's minimum height is `_INFO_BAR_MIN_HEIGHT_PX` with a provenance comment
-    (tuning floor, not a measurement); and `platform_windows.py`'s
-    `_WALLPAPER_REGISTRY_CODES`/`_DESKTOP_WALLPAPER_POSITION` (two dicts mapping the
-    same style names to two different numeric schemes) are merged into one
-    `_WALLPAPER_STYLE_CODES` dict of `_StyleCodes` tuples, so the two schemes can't
-    drift out of sync. `_GEOS_AREA_CONUS` and `trim_source_caption_frac` already
-    carried adequate provenance/re-derivation comments and were left as-is.
 11. **A second backend now exists and single-monitor wallpaper apply is verified on
     real hardware.** `platform_linux_kde.KDEPlatform` (KDE Plasma, via `qdbus`/
     `qdbus6` `evaluateScript` scripting and `plasma-apply-wallpaperimage`) was built
@@ -378,15 +267,6 @@ A few non-obvious things learned while building and testing this, not really
       own independent cache entry, layered on top — no new cache-key work needed
       there, unlike when this item was originally scoped against the old
       single-slot-per-provider shape).
-17. ~~**`DEFAULT_DATA_DIR` hardcodes Windows' AppData layout in the cross-platform
-    core.**~~ Done: `WallpaperPlatform` gained `default_data_dir()`/
-    `default_font_path()` abstract methods (implemented in `WindowsPlatform`), and
-    `load_config(..., platform=...)` — as called from `main()` — prefers those over
-    Config's own Windows-flavored class-level defaults whenever config.toml/CLI
-    don't set `data_dir`/`info_font_path` explicitly. Config's class-level defaults
-    are unchanged (still Windows paths) since they're what direct `Config()`
-    construction — most of the test suite — relies on; a future Linux/macOS backend
-    only needs to implement the two new methods, not touch Config or its defaults.
 18. **GeoJSON overlay providers aren't area-aware.** `geojson_sources`/
     `shell_sources` call `lonlat_to_pixels(satellite, ...)` directly, so on a
     `satpy_raw` Full Disk/Mesoscale frame — where `graticule` *does* work via the
@@ -396,32 +276,6 @@ A few non-obvious things learned while building and testing this, not really
     it. Cache-key note: `_geojson_files_cache_key`/`_cache_id` would then need the
     area extent in the key (satellite alone no longer identifies the projection once
     Full Disk and CONUS frames both render).
-19. ~~**Nothing prunes stale `overlay_geojson_cache_*.png` entries** in
-    `data_dir`.~~ Done: `prune_stale_geojson_cache` (called once per cycle from
-    each `run_once*`) deletes an `overlay_geojson_cache_<id>.png`/`.json` pair
-    once it's gone unused for `overlay_cache_max_age_days` (30 by default; 0
-    disables it). "Unused" is tracked by mtime — `render_static_geojson_overlay`
-    now touches both files on every cache *hit*, not just on rebuild, so an
-    entry a running config still matches every cycle never goes stale no matter
-    how old its content is; only an orphaned identity (a removed/renamed source,
-    or one that changed satellite/resolution/style) ages out. Still not folded
-    into gap 16's per-combo cache-key work — the pruning is identity-agnostic,
-    so it'll cover whatever shape that work lands on without changes.
-20. ~~**Platform selection is hardcoded, not configurable.**~~ Done: `platform`
-    config setting (`"auto"` default, or explicit `"windows"`/`"kde"`/`"render"`)
-    short-circuits `get_platform()`'s `sys.platform`/`XDG_CURRENT_DESKTOP` sniffing.
-    config.toml only — no CLI flag yet. `"render"` (`platform_render.
-    RenderOnlyPlatform`) is a third, non-hardware-backed option added alongside this:
-    every method is a fixed fallback or a no-op (never applies a desktop wallpaper),
-    for headless boxes/containers/CI where only the rendered image (`render_to`)
-    matters — see README's "Render-only backend" section. Unlike `"windows"`/`"kde"`,
-    it's never chosen by `"auto"`. Its fallback render size is configurable via the
-    same `screen_width`/`screen_height` config already used for real backends'
-    overrides — `get_platform()` forwards them into `RenderOnlyPlatform`'s
-    constructor (as `render_fallback_width`/`height`) specifically so
-    `list_monitors()` can honor them too, since that method (unlike
-    `get_screen_size()`) has no per-call size parameters to take an override
-    through.
 21. **Reprojection (`output_projection`) is low quality: nearest-neighbor only, and
     warps already-drawn overlays instead of redrawing them.** Two related issues in
     `reproject_frame`, both visible in `PROJECTIONS.md`'s gallery:
