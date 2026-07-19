@@ -78,9 +78,13 @@ comment; the highlights:
   `resolution`. NOAA serves discrete sizes per sector, not an arbitrary resize.
   Default is `5000x3000`, enough to cover a 4K monitor without upsampling —
   bump higher if you crop aggressively via `source_crop_*`/combos.
-* **`source_kind`** — `"cdn_jpg"` (default, the above) or `"satpy_raw"`
-  (composite your own image from raw satellite data instead — heavier, opt-in).
-  See [Custom raw-data source](#custom-raw-data-source-satpy_raw) below.
+* **`source_kind`** — `"cdn_jpg"` (default, the above), `"satpy_raw"`
+  (composite your own image from raw satellite data instead — heavier, opt-in;
+  see [Custom raw-data source](#custom-raw-data-source-satpy_raw) below), or
+  `"image_file"` (open any Pillow-decodable image directly from `image_path` — a
+  local path or URL — instead of fetching from NOAA/AWS at all; no content-type
+  restriction, so plain TIFF/GeoTIFF pixel data works too, but there's no CRS/
+  geotransform parsing, so no georeferencing for this source).
 * **Screen handling** — `crop_to_screen` does a cover-crop so the image exactly
   fills your screen; `crop_anchor` biases where that crop is taken from;
   `span_all_monitors` crops to the full virtual desktop instead of just the

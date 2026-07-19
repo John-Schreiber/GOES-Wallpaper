@@ -125,3 +125,28 @@ def test_resolve_source_combo_falls_back_to_config_lonlat_crop_when_unset():
     combo = gw.Combo(name="c")  # lon/lat crop fields unset
     source = gw.resolve_source(cfg, combo)
     assert (source.crop_min_lon, source.crop_min_lat, source.crop_max_lon, source.crop_max_lat) == (-110.0, 30.0, -90.0, 45.0)
+
+
+def test_resolve_source_default_uses_top_level_image_path():
+    source = gw.resolve_source(gw.Config(source_kind="image_file", image_path="frame.png"), None)
+    assert source.image_path == "frame.png"
+
+
+def test_resolve_source_combo_image_path_overrides_config():
+    cfg = gw.Config(source_kind="image_file", image_path="a.png")
+    combo = gw.Combo(name="c", source_kind="image_file", image_path="b.png")
+    source = gw.resolve_source(cfg, combo)
+    assert source.image_path == "b.png"
+
+
+def test_resolve_source_combo_falls_back_to_config_image_path():
+    cfg = gw.Config(source_kind="image_file", image_path="a.png")
+    combo = gw.Combo(name="c", source_kind="image_file")  # image_path unset
+    source = gw.resolve_source(cfg, combo)
+    assert source.image_path == "a.png"
+
+
+def test_effective_source_key_ignores_product_resolution_for_image_file():
+    cfg = gw.Config(source_kind="image_file", image_path="frame.png")
+    source = gw.resolve_source(cfg, None)
+    assert source.key == "image_file/frame.png"

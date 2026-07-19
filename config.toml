@@ -45,6 +45,18 @@ resolution = "5000x3000"
 # connection (metered_resolution can't help here). See README.md's "Custom
 # raw-data source (satpy_raw)" section and CUSTOM_IMAGERY_PLAN.md.
 # source_kind = "satpy_raw"
+#
+# "image_file" opens any Pillow-decodable image directly from image_path (a local
+# path or an http(s) URL) instead of fetching from NOAA/AWS at all -- your own
+# already-georeferenced imagery, a one-off test frame, etc. Whatever Pillow's
+# installed plugins can open works, including plain TIFF/GeoTIFF pixel data --
+# but GeoTIFF's embedded CRS/geotransform tags are NOT parsed (that would need
+# rasterio/GDAL, not used here), so there's no georeferencing for this
+# source_kind: source_crop_min_lon/etc. and output_projection fall back to the
+# plain fractional crop, same as an uncalibrated cdn_jpg sector. `product`/
+# `resolution` above are ignored, same as satpy_raw.
+# source_kind = "image_file"
+# image_path = "C:/path/to/image.png"  # or "https://example.com/image.tif"
 source_kind = "cdn_jpg"
 
 # --- Output ---
