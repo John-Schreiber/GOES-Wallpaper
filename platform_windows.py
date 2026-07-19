@@ -49,6 +49,7 @@ import asyncio
 import ctypes
 import json
 import logging
+import os
 import subprocess
 from ctypes import wintypes
 from pathlib import Path
@@ -161,10 +162,16 @@ def _query_wmi_resolution() -> tuple[int, int] | None:
     """Ask WMI for the video driver's current display mode. Unlike GetSystemMetrics,
     this reads the driver/hardware state directly rather than the calling process's
     window station, so it still works when the process has no interactive desktop."""
+    # Invoked by absolute path rather than bare "powershell" so a hostile PATH entry
+    # (e.g. an attacker-writable directory ahead of System32) can't get executed instead.
+    powershell = os.path.join(
+        os.environ.get("SystemRoot", r"C:\Windows"),
+        "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
+    )
     try:
         proc = subprocess.run(
             [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                powershell, "-NoProfile", "-NonInteractive", "-Command",
                 "Get-CimInstance -ClassName Win32_VideoController | "
                 "Where-Object { $_.CurrentHorizontalResolution } | "
                 "Select-Object -First 1 CurrentHorizontalResolution,CurrentVerticalResolution | "

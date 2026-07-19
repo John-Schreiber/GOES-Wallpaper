@@ -45,6 +45,7 @@ import os
 import random
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from dataclasses import dataclass, field, fields, replace
@@ -1459,24 +1460,78 @@ def draw_graticule(
     return base.convert("RGB")
 
 
+_OVERLAY_SHELL_MAX_OUTPUT_BYTES = 16 * 1024 * 1024  # per stream; caps memory use against a runaway/malicious provider
+
+
+def _read_stream_capped(stream: BinaryIO, max_bytes: int, result: dict[str, Any]) -> None:
+    """Read `stream` into `result["data"]` until EOF or `max_bytes` is exceeded, in
+    which case `result["truncated"]` is set and reading stops (the still-running
+    process will then block on its next write, letting the caller's proc.wait()
+    timeout catch it). Meant to run on its own thread so a capped stdout read can't
+    deadlock against an uncapped stderr writer, or vice versa."""
+    buf = bytearray()
+    while True:
+        chunk = stream.read(65536)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            result["truncated"] = True
+            break
+    result["data"] = bytes(buf)
+
+
 def fetch_shell_geojson(command: tuple[str, ...], timeout: float) -> dict[str, Any] | None:
     """Run an external command (argv list, no shell parsing) and parse its stdout as
-    GeoJSON. Returns None (logged) on any failure -- a broken provider must not break
-    the whole update cycle."""
+    GeoJSON. stdout/stderr are each capped at _OVERLAY_SHELL_MAX_OUTPUT_BYTES so a
+    runaway/malicious provider process can't exhaust memory before the timeout fires.
+    Returns None (logged) on any failure -- a broken provider must not break the whole
+    update cycle."""
     if not command:
         return None
     try:
-        result = subprocess.run(list(command), capture_output=True, text=True, timeout=timeout, check=False)
-    except (OSError, subprocess.TimeoutExpired) as e:
+        proc = subprocess.Popen(list(command), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as e:
         logging.warning("overlay_shell_command %s failed to run: %s", command, e)
         return None
-    if result.returncode != 0:
+
+    stdout_result: dict[str, Any] = {"data": b"", "truncated": False}
+    stderr_result: dict[str, Any] = {"data": b"", "truncated": False}
+    stdout_thread = threading.Thread(
+        target=_read_stream_capped, args=(proc.stdout, _OVERLAY_SHELL_MAX_OUTPUT_BYTES, stdout_result), daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_read_stream_capped, args=(proc.stderr, _OVERLAY_SHELL_MAX_OUTPUT_BYTES, stderr_result), daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        logging.warning("overlay_shell_command %s timed out after %ss", command, timeout)
+        return None
+    finally:
+        stdout_thread.join(timeout=1)
+        stderr_thread.join(timeout=1)
+        proc.stdout.close()
+        proc.stderr.close()
+
+    if stdout_result["truncated"] or stderr_result["truncated"]:
         logging.warning(
-            "overlay_shell_command %s exited %d: %s", command, result.returncode, result.stderr.strip(),
+            "overlay_shell_command %s exceeded the %d-byte output cap; discarding",
+            command, _OVERLAY_SHELL_MAX_OUTPUT_BYTES,
+        )
+        return None
+    if proc.returncode != 0:
+        logging.warning(
+            "overlay_shell_command %s exited %d: %s",
+            command, proc.returncode, stderr_result["data"].decode(errors="replace").strip(),
         )
         return None
     try:
-        return json.loads(result.stdout)
+        return json.loads(stdout_result["data"])
     except json.JSONDecodeError as e:
         logging.warning("overlay_shell_command %s returned invalid JSON: %s", command, e)
         return None

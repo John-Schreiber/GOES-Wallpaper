@@ -76,25 +76,26 @@ before decoding, `overlay_shell_command` is argv-only (no shell parsing), and th
 release workflow's permissions are minimal (`contents: write` only). Worth
 addressing or keeping in mind:
 
-- **`config.toml` is a code-execution surface by design** — `overlay_shell_command`
-  runs whatever argv the config specifies. That's the feature working as intended,
-  but it means `--config` must never be pointed at an untrusted file, and the config
-  shouldn't be writable by less-privileged users. Worth one sentence in the README's
-  overlay section saying exactly that.
-- **`_query_wmi_resolution` invokes `powershell` by bare name** (PATH lookup). In a
-  hostile-PATH scenario that's hijackable. Cheap hardening: invoke via the absolute
-  path (`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`) — it already
-  passes `-NoProfile -NonInteractive`, which is the other half of that hardening.
+- ~~**`config.toml` is a code-execution surface by design**~~ Done: `OVERLAYS.md`'s
+  `[[shell_sources]]` section now has a "Security note" spelling out that `command`
+  runs whatever argv is configured every cycle, so `--config`/`--overlays-config`
+  must never point at an untrusted file and neither file should be writable by
+  less-privileged users.
+- ~~**`_query_wmi_resolution` invokes `powershell` by bare name**~~ Done:
+  `platform_windows.py._query_wmi_resolution` now resolves
+  `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` explicitly instead of
+  relying on a PATH lookup.
 - **Pillow decodes untrusted network bytes every cycle** — keep Pillow current
   (`uv.lock` pins it; `uv lock --upgrade-package pillow` periodically), and keep the
   decompression-bomb guard enabled when fixing bug 5 above.
-- **`overlay_shell_command` stdout is read unbounded** (`capture_output=True`). A
-  runaway/malicious provider process can exhaust memory before the timeout fires.
-  Low priority (the command is already trusted config), but a size cap would make
-  the failure mode graceful.
-- **GitHub Actions are pinned by tag** (`actions/checkout@v4`, `astral-sh/setup-uv@v5`),
-  not commit SHA. Tag-pinning trusts the action repo not to move the tag; SHA-pinning
-  is the standard hardening if supply-chain risk matters here.
+- ~~**`overlay_shell_command` stdout is read unbounded**~~ Done:
+  `goes_wallpaper.fetch_shell_geojson` now reads stdout/stderr on background threads
+  via `_read_stream_capped`, each capped at `_OVERLAY_SHELL_MAX_OUTPUT_BYTES` (16
+  MiB); exceeding the cap kills the process and discards the result instead of
+  buffering it all in memory.
+- ~~**GitHub Actions are pinned by tag**~~ Done: `ci.yml`/`release.yml` now pin
+  `actions/checkout`/`astral-sh/setup-uv` by commit SHA (with the version as a
+  trailing comment) instead of a mutable tag.
 - ~~**`user_agent` still points at the upstream repo**~~ Done: now points at this
   fork (`+https://github.com/John-Schreiber/GOES-Wallpaper`).
 
