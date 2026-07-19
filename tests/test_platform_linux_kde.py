@@ -21,8 +21,10 @@ import platform_linux_kde as klink
 @pytest.fixture(autouse=True)
 def _clear_qdbus_cache():
     klink._qdbus_binary.cache_clear()
+    klink._kwriteconfig_binary.cache_clear()
     yield
     klink._qdbus_binary.cache_clear()
+    klink._kwriteconfig_binary.cache_clear()
 
 
 def _completed(stdout="", returncode=0, stderr=""):
@@ -289,3 +291,66 @@ class TestIsNetworkMetered:
         with patch("shutil.which", return_value="/usr/bin/nmcli"), \
              patch("subprocess.run", return_value=_completed(stdout="wlan0:disconnected\n")):
             assert platform.is_network_metered() is None
+
+
+class TestKwriteconfigBinary:
+    def test_prefers_kwriteconfig6_over_kwriteconfig5(self):
+        with patch("shutil.which", side_effect=lambda name: f"/usr/bin/{name}"):
+            assert klink._kwriteconfig_binary() == "/usr/bin/kwriteconfig6"
+
+    def test_falls_back_to_kwriteconfig5(self):
+        with patch("shutil.which", side_effect=lambda name: "/usr/bin/kwriteconfig5" if name == "kwriteconfig5" else None):
+            assert klink._kwriteconfig_binary() == "/usr/bin/kwriteconfig5"
+
+    def test_none_when_neither_found(self):
+        with patch("shutil.which", return_value=None):
+            assert klink._kwriteconfig_binary() is None
+
+
+class TestSupportsLockScreen:
+    def test_true_when_kwriteconfig_found(self):
+        platform = klink.KDEPlatform()
+        with patch("shutil.which", return_value="/usr/bin/kwriteconfig6"):
+            assert platform.supports_lock_screen() is True
+
+    def test_false_when_kwriteconfig_missing(self):
+        platform = klink.KDEPlatform()
+        with patch("shutil.which", return_value=None):
+            assert platform.supports_lock_screen() is False
+
+
+class TestApplyLockScreen:
+    def test_noop_with_warning_when_no_binary(self, tmp_path):
+        platform = klink.KDEPlatform()
+        with patch("shutil.which", return_value=None), \
+             patch("subprocess.run") as run:
+            platform.apply_lock_screen(tmp_path / "wallpaper.jpg")
+        run.assert_not_called()
+
+    def test_writes_expected_kconfig_group_and_uri(self, tmp_path):
+        platform = klink.KDEPlatform()
+        path = tmp_path / "wallpaper.jpg"
+        with patch("shutil.which", return_value="/usr/bin/kwriteconfig6"), \
+             patch("subprocess.run", return_value=_completed()) as run:
+            platform.apply_lock_screen(path)
+
+        args = run.call_args[0][0]
+        assert args[0] == "/usr/bin/kwriteconfig6"
+        assert args[1:] == [
+            "--file", "kscreenlockerrc",
+            "--group", "Greeter", "--group", "Wallpaper",
+            "--group", "org.kde.image", "--group", "General",
+            "--key", "Image", path.as_uri(),
+        ]
+
+    def test_logs_warning_on_nonzero_exit(self, tmp_path):
+        platform = klink.KDEPlatform()
+        with patch("shutil.which", return_value="/usr/bin/kwriteconfig6"), \
+             patch("subprocess.run", return_value=_completed(returncode=1, stderr="boom")):
+            platform.apply_lock_screen(tmp_path / "wallpaper.jpg")  # no raise
+
+    def test_logs_warning_when_subprocess_raises(self, tmp_path):
+        platform = klink.KDEPlatform()
+        with patch("shutil.which", return_value="/usr/bin/kwriteconfig6"), \
+             patch("subprocess.run", side_effect=OSError("no kwriteconfig")):
+            platform.apply_lock_screen(tmp_path / "wallpaper.jpg")  # no raise

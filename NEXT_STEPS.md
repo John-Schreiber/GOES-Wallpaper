@@ -31,7 +31,8 @@ just what looks highest-leverage first:
    audience-widener; 17 is a prerequisite discovered in this review (the default
    `data_dir` hardcodes Windows' AppData layout in the supposedly cross-platform
    core).
-6. Everything else (lock screen, frozen exe, geocoding, icons) as interest dictates.
+6. Everything else (lock screen on macOS -- Windows and KDE are done, see gap 13;
+   frozen exe, geocoding, icons) as interest dictates.
 
 ## Bug fixes needed (2026-07-16 full-repo review)
 
@@ -215,29 +216,62 @@ A few non-obvious things learned while building and testing this, not really
     overlay rendering, or reducing `per_monitor` mode to just its primary monitor);
     and applying both settings per-monitor in `per_monitor` mode instead of only as a
     whole-cycle skip.
-13. **Lock screen support** — set the Windows lock screen image, not just the desktop
-    wallpaper. Meaningfully more friction than desktop wallpaper, worth scoping
-    carefully before starting:
-    - The "proper" API is WinRT `Windows.System.UserProfile.LockScreen.
-      SetImageFileAsync()` — but WinRT APIs touching user-profile/personalization
-      state have historically required the calling process to have package identity
-      (a packaged/MSIX app), which a plain unpackaged script or `pip`-installed
-      console script doesn't have. Needs verifying whether this actually works from
-      an unpackaged process on current Windows before assuming it's usable at all.
-    - The fallback is the registry/Group Policy route
-      (`HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\Personalization`'s
-      `LockScreenImage` value), which requires the process to run elevated (a real
-      step up — everything else in this project runs as the logged-in user) and is
-      Windows-edition-dependent (documented for Pro/Enterprise; Home is unverified).
-    - Shape: a new `apply_lock_screen(path: Path) -> None` method on
-      `WallpaperPlatform` (possibly paired with a `supports_lock_screen() -> bool`
-      capability check), and an opt-in `set_lock_screen: bool = False` config field
-      (opt-in specifically because of the elevation requirement).
-    - Worth deciding up front whether the lock screen image should always mirror the
-      desktop wallpaper, or could reasonably be a distinct combo/crop (a
-      portrait-oriented crop makes more sense for a lock screen than the desktop's
-      landscape cover-crop) — affects whether this reuses the existing render or
-      needs its own pass.
+13. **Lock screen support — done for Windows + KDE Plasma, single/rotate modes
+    only; per_monitor/macOS still open; always mirrors the wallpaper exactly.**
+    `WallpaperPlatform.apply_lock_screen()`/`supports_lock_screen()`
+    (`platform_base.py`) plus `Config.set_lock_screen` (opt-in, `goes_wallpaper.py`)
+    are implemented and wired into `run_once`/`run_once_rotate`, gated by
+    `validate_lock_screen()` at startup.
+    - **Windows** (`platform_windows.py.apply_lock_screen`): uses WinRT
+      `Windows.System.UserProfile.LockScreen.SetImageFileAsync()`. The assumption
+      above — that this needs package identity (MSIX) — turned out to be **wrong**:
+      verified against real hardware (Windows 11, build 26100) from this project's
+      plain uv-managed venv `python.exe`, no package identity, no elevation. The call
+      succeeded and `LockScreen.original_image_file` read back the path just set,
+      confirmed independently via the registry cache at `HKCU\SOFTWARE\Microsoft\
+      Windows\CurrentVersion\Lock Screen` (which recorded `python.exe` as the setting
+      app). The registry/Group Policy fallback discussed below was never needed and
+      isn't implemented. Caveat: this machine already had the lock screen in
+      single-picture mode (`RotatingLockScreenEnabled`/`SlideshowEnabled` both `0`);
+      Windows Spotlight or slideshow lock-screen modes weren't tested and may not
+      show the set image without the user switching to "Picture" mode first — not
+      handled or detected by `apply_lock_screen()` yet.
+    - **combo_mode = "per_monitor"**: intentionally unsupported —
+      `validate_lock_screen()` raises at startup if `set_lock_screen = true` is
+      paired with it, since there's no per-monitor lock screen concept to map
+      per-monitor assignments onto.
+    - **KDE** (`platform_linux_kde.py.apply_lock_screen`): writes directly to
+      `~/.config/kscreenlockerrc`'s `[Greeter][Wallpaper][org.kde.image][General]`
+      group (`Image` key, `file://` URI) via `kwriteconfig6`/`kwriteconfig5` — the
+      same file/group System Settings' "Screen Locking -> Appearance" wallpaper
+      picker writes to, per KDE Discuss threads (see the module docstring for
+      sources). No PlasmaShell D-Bus scripting equivalent exists for the greeter
+      (unlike `apply_wallpaper`); direct KConfig writes are the only documented
+      mechanism. Takes effect next time the greeter is invoked, not live on an
+      already-open lock screen. **Unverified against a real Plasma session** — no
+      KDE test environment available during development, same caveat as this
+      module's other untested paths (see its docstring, NEXT_STEPS.md item 11).
+      `kscreenlocker_greet --testing` is the documented way to check this live
+      without risking an un-unlockable session, whenever someone has a Plasma box
+      to try it on.
+    - **Explicitly decided against for now: independent lock screen
+      configurability.** Considered giving `set_lock_screen` its own combo-like
+      config (satellite/sector/crop/style, or at minimum an independent crop for a
+      portrait-oriented framing instead of the desktop's landscape cover-crop) —
+      deferred. Current behavior always mirrors `cfg.wallpaper_path` exactly, same
+      crop/style as the desktop wallpaper, no separate render pass. **When this is
+      picked back up: reuse the cycle's already-fetched/downloaded source image**
+      (the `EffectiveSource`/fetched frame already in hand in `run_once`/
+      `run_once_rotate`) for the lock screen's independent crop/render, rather than
+      triggering a second network fetch — the point is an extra `PIL` crop+resize
+      pass on data already in memory, not doubling `source_kind = "satpy_raw"`'s
+      already-heavy per-cycle bandwidth. A full independent combo (different
+      satellite/sector entirely) would be a further step beyond that and fetch
+      separately, same as any other combo does today.
+    - **macOS**: not investigated at all — no equivalent gap entry existed before,
+      and still doesn't. Note: macOS's actual lock screen and the login-window
+      background are two different things; whichever this eventually targets needs
+      to be nailed down explicitly, it's easy to conflate the two.
 14. **A frozen standalone executable** (PyInstaller/Nuitka), so a non-technical
     Windows user could download and run without installing Python/uv at all.
     Explicitly backlogged behind the package-install path (`uv build`/`pip install .`/

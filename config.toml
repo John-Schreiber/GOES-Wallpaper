@@ -50,6 +50,9 @@ source_kind = "cdn_jpg"
 # --- Output ---
 # data_dir = "C:/Users/you/AppData/Local/GOES-Wallpaper"  # defaults to that path already
 wallpaper_style = "fill"  # fill | fit | stretch | tile | center | span
+# set_lock_screen = true  # also apply the same image as the lock screen (Windows
+                           # and KDE Plasma only so far; not supported with
+                           # combo_mode = "per_monitor")
 # render_to = "C:/Users/you/Desktop/test_render.jpg"  # save the rendered frame here
                            # and skip applying it as the wallpaper -- for testing
 # overlay_cache_max_age_days = 30  # delete overlay_geojson_cache_*.png/.json pairs

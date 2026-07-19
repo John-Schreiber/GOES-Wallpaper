@@ -325,6 +325,50 @@ class TestValidatePlatform:
     def test_render_is_valid(self):
         gw.validate_platform(gw.Config(platform="render"))  # no raise
 
+
+class _FakeLockScreenPlatform:
+    """Duck-typed stub -- validate_lock_screen only calls supports_lock_screen."""
+
+    def __init__(self, supports: bool):
+        self._supports = supports
+
+    def supports_lock_screen(self):
+        return self._supports
+
+
+class TestValidateLockScreen:
+    def test_default_is_valid(self):
+        gw.validate_lock_screen(gw.Config(), _FakeLockScreenPlatform(False))  # no raise
+
+    def test_disabled_is_valid_even_on_unsupported_platform(self):
+        gw.validate_lock_screen(
+            gw.Config(set_lock_screen=False), _FakeLockScreenPlatform(False)
+        )  # no raise
+
+    def test_enabled_on_supporting_platform_passes(self):
+        gw.validate_lock_screen(
+            gw.Config(set_lock_screen=True), _FakeLockScreenPlatform(True)
+        )  # no raise
+
+    def test_enabled_on_unsupporting_platform_raises(self):
+        with pytest.raises(ValueError, match="doesn't support setting the lock screen"):
+            gw.validate_lock_screen(
+                gw.Config(set_lock_screen=True), _FakeLockScreenPlatform(False)
+            )
+
+    def test_enabled_with_per_monitor_combo_mode_raises(self):
+        with pytest.raises(ValueError, match='combo_mode = "per_monitor"'):
+            gw.validate_lock_screen(
+                gw.Config(set_lock_screen=True, combo_mode="per_monitor"),
+                _FakeLockScreenPlatform(True),
+            )
+
+    def test_disabled_with_per_monitor_combo_mode_is_valid(self):
+        gw.validate_lock_screen(
+            gw.Config(set_lock_screen=False, combo_mode="per_monitor"),
+            _FakeLockScreenPlatform(True),
+        )  # no raise
+
     def test_bogus_platform_raises(self):
         with pytest.raises(ValueError, match="platform must be one of"):
             gw.validate_platform(gw.Config(platform="bogus"))

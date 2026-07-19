@@ -17,6 +17,9 @@ dependencies = [
     "comtypes>=1.4.16; sys_platform == 'win32'",
     "winrt-windows-networking-connectivity>=3.2.1; sys_platform == 'win32'",
     "winrt-windows-system-power>=3.2.1; sys_platform == 'win32'",
+    "winrt-windows-system-userprofile>=3.2.1; sys_platform == 'win32'",
+    "winrt-windows-storage>=3.2.1; sys_platform == 'win32'",
+    "winrt-windows-foundation>=3.2.1; sys_platform == 'win32'",
     "pyobjc-framework-Cocoa>=10.3.1; sys_platform == 'darwin'",
 ]
 

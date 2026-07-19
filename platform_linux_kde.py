@@ -67,6 +67,29 @@ Power/network detection use `upower`/`nmcli` directly rather than any
 KDE-specific API -- both are the de facto standard on Linux desktops generally
 (Plasma's own battery/network applets sit on top of the same daemons), not
 something specific to Plasma worth re-deriving here.
+
+Lock screen: apply_lock_screen() writes directly to `~/.config/kscreenlockerrc`
+via `kwriteconfig6`/`kwriteconfig5` -- kscreenlocker's greeter (kscreenlocker_greet)
+reads its background from a config group entirely separate from the desktop
+wallpaper's `org.kde.image` containment config above: `[Greeter][Wallpaper]
+[org.kde.image][General]`'s `Image` key, as a `file://` URI, which is exactly what
+System Settings' "Screen Locking -> Appearance" wallpaper picker itself writes.
+Unlike apply_wallpaper, there's no PlasmaShell D-Bus scripting equivalent for the
+greeter -- direct KConfig writes are the only documented mechanism found. Per
+KDE Discuss threads, this takes effect the next time the greeter is invoked (not
+a live update to an already-open lock screen), no logout/reboot required; there's
+also a documented but unverified `org.freedesktop.ScreenSaver`'s `configure`
+D-Bus method to force an immediate re-read, not used here since the "next lock
+picks it up" behavior is good enough for this project's use case. Sources:
+https://discuss.kde.org/t/change-lockscreen-wallpaper-from-command-line/11944,
+https://discuss.kde.org/t/changing-lockscreen-and-wallpaper-on-plasma-6/12267,
+https://paulsorensen.io/wallpaper-shell-kde-plasma/. Like the rest of this
+module's untested paths (see above), this was never exercised against a live
+Plasma session -- treat it as "should work per documented/community-verified
+behavior" rather than confirmed, until someone runs it for real (kscreenlocker_
+greet's own `--testing` flag launches the greeter in a normal window instead of a
+real lock, for exactly this kind of verification without risking an
+un-unlockable session).
 """
 
 from __future__ import annotations
@@ -130,6 +153,12 @@ def _qdbus_binary() -> str | None:
     """Plasma 6 renamed qdbus to qdbus6 (Qt6-based); Plasma 5 (and some Plasma 6
     distro packages) still ship plain qdbus. Try both, prefer qdbus6."""
     return shutil.which("qdbus6") or shutil.which("qdbus")
+
+
+@functools.lru_cache(maxsize=1)
+def _kwriteconfig_binary() -> str | None:
+    """Same Plasma 5/6 rename as qdbus above: kwriteconfig5 -> kwriteconfig6."""
+    return shutil.which("kwriteconfig6") or shutil.which("kwriteconfig5")
 
 
 class KDEPlatform(WallpaperPlatform):
@@ -378,6 +407,34 @@ class KDEPlatform(WallpaperPlatform):
         if value in ("no", "guess-no"):
             return False
         return None
+
+    def supports_lock_screen(self) -> bool:
+        return _kwriteconfig_binary() is not None
+
+    def apply_lock_screen(self, path: Path) -> None:
+        binary = _kwriteconfig_binary()
+        if not binary:
+            logging.warning(
+                "No kwriteconfig6/kwriteconfig5 binary found; can't set the KDE "
+                "lock screen background."
+            )
+            return
+        try:
+            proc = subprocess.run(
+                [binary, "--file", "kscreenlockerrc",
+                 "--group", "Greeter", "--group", "Wallpaper",
+                 "--group", "org.kde.image", "--group", "General",
+                 "--key", "Image", path.as_uri()],
+                capture_output=True, text=True, timeout=_EVALUATE_SCRIPT_TIMEOUT,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            logging.warning("Failed to run kwriteconfig for the KDE lock screen: %s", exc)
+            return
+        if proc.returncode != 0:
+            logging.warning(
+                "kwriteconfig failed to set the KDE lock screen background (exit %d): %s",
+                proc.returncode, proc.stderr.strip(),
+            )
 
     def default_data_dir(self) -> Path:
         xdg_data_home = os.environ.get("XDG_DATA_HOME")
