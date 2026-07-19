@@ -1940,7 +1940,20 @@ def compute_next_run(cfg: Config, state: dict[str, Any], now: float) -> float:
         return (now // interval + 1) * interval
 
     next_run = (now // interval) * interval + phase + cfg.capture_offset_buffer_seconds
-    while next_run <= now:
+
+    # run_loop calls this right after a cycle that may have just learned this very
+    # phase from a fresh capture -- the EMA can nudge the phase later than the target
+    # that fetch was scheduled against, which would otherwise let next_run land back
+    # in the *same* interval we just serviced (a spurious near-immediate re-poll that
+    # can only ever see the same frame again). Floor at one interval past whatever we
+    # last actually captured, so a freshly-learned phase always targets the next one.
+    floor = now
+    last_capture = state.get("last_capture_time_utc")
+    if last_capture:
+        last_epoch = datetime.fromisoformat(last_capture).timestamp()
+        floor = max(floor, (last_epoch // interval) * interval + interval)
+
+    while next_run <= floor:
         next_run += interval
     return next_run
 

@@ -66,6 +66,18 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   publish phase (different satellite/sector/product) can differ. `run_loop` now
   computes the phase from the upcoming combo (`state["combo_rotation_index"]`,
   already advanced before state is saved) instead.
+- `--loop` could re-poll the same interval it had just successfully fetched,
+  wasting a request and spamming `log.txt` with a spurious ~1s sleep right after a
+  normal one — found via a long supervised soak run (`NEXT_STEPS.md` gap 1).
+  `compute_next_run` is called right after a cycle that may have just nudged
+  `capture_phase_seconds` (via `update_capture_phase`) from that exact interval's
+  fresh capture; if the EMA nudged the phase *later* than the target that capture
+  was originally fetched against, `boundary + phase + buffer` could still land
+  ahead of `now` — inside the interval already serviced — instead of the next one.
+  `compute_next_run` now floors its result to one interval past
+  `state["last_capture_time_utc"]` (already recorded every successful cycle), so a
+  freshly-learned phase always targets the next interval, never the one just
+  consumed.
 
 ### Changed — BREAKING: overlays moved out of config.toml
 

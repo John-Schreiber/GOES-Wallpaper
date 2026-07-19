@@ -84,6 +84,47 @@ class TestComputeNextRun:
         boundary = (now // 300) * 300
         assert gw.compute_next_run(cfg, state, now) == boundary + 300
 
+    def test_freshly_learned_phase_never_targets_the_interval_just_serviced(self):
+        # Regression for the long-`--loop`-soak bug: run_loop calls compute_next_run
+        # right after a cycle that may have *just* nudged capture_phase_seconds (via
+        # update_capture_phase) from this exact interval's fresh capture. If the EMA
+        # nudges the phase later than the target that capture was fetched against, the
+        # naive boundary+phase+buffer math can still be ahead of `now` -- landing back
+        # in the *same* interval already serviced, causing a spurious ~1s re-poll that
+        # can only ever see the same frame again (this is exactly the "Sleeping 1.0s"/
+        # "Sleeping 4.2s" noise seen right after a successful download in a real soak
+        # log). last_capture_time_utc (already recorded every successful cycle) must
+        # floor next_run to strictly the *next* interval in this case.
+        cfg = gw.Config(interval_minutes=5, capture_offset_buffer_seconds=20.0)
+        boundary = 1_700_000_400
+        # This cycle's fetch was scheduled against an old phase of 40s, actually
+        # landed (and was processed) at boundary+42s, but the fresh capture's own
+        # raw phase (58s) is later than the old average -- nudging the EMA-smoothed
+        # phase up to 40 + 0.3*(58-40) = 45.4s, so boundary+45.4+20=85.4s is still
+        # *ahead* of now (42s in) despite this interval already being serviced.
+        state = {
+            "capture_phase_seconds": 45.4,
+            "capture_phase_interval_minutes": 5,
+            "last_capture_time_utc": iso_at(boundary + 58),
+        }
+        now = boundary + 42
+        next_run = gw.compute_next_run(cfg, state, now)
+        assert next_run == boundary + 300 + 45.4 + 20.0
+        assert next_run > boundary + 300  # strictly the next interval, not this one
+
+    def test_last_capture_floor_is_a_noop_when_next_run_already_rolls_forward(self):
+        # The floor should never *shorten* the normal roll-forward -- only guard
+        # against the specific case above.
+        cfg = gw.Config(interval_minutes=5, capture_offset_buffer_seconds=20.0)
+        boundary = 1_700_000_400
+        state = {
+            "capture_phase_seconds": 40.0,
+            "capture_phase_interval_minutes": 5,
+            "last_capture_time_utc": iso_at(boundary + 40),
+        }
+        now = boundary + 100  # target (60) already passed, same as the non-floored case
+        assert gw.compute_next_run(cfg, state, now) == boundary + 300 + 60
+
 
 class TestMaybeWaitForSync:
     def test_disabled_never_sleeps(self, monkeypatch):
