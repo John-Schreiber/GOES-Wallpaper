@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "goes-wallpaper"
-version = "2.2.0"
+version = "2.3.0"
 description = "Update your desktop wallpaper (Windows, KDE Plasma, or macOS) to the latest GOES satellite image"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
