@@ -190,37 +190,46 @@ class TestMaybeWaitForSync:
 class TestNextCycleSourceKey:
     """run_loop schedules its next wake-up off the phase of whichever source
     _next_cycle_source_key names -- these pin down that in "rotate" mode this must
-    be the *upcoming* combo (state["combo_rotation_index"], already advanced by
-    run_once_rotate before it saves state), not state["last_source_key"] (the combo
-    *just* fetched, whose publish phase can differ)."""
+    be the *upcoming* pipeline (derived from state["pipeline_rotation_name"], the
+    name of whichever pipeline run_once_rotate most recently showed), not
+    state["last_source_key"] (the pipeline *just* fetched, whose publish phase can
+    differ)."""
 
-    def _combos(self):
+    def _pipelines(self):
         return (
-            gw.Combo(name="a", satellite="GOES18", sector="CONUS"),
-            gw.Combo(name="b", satellite="GOES19", sector="FD"),
+            gw.Pipeline(name="a", satellite="GOES18", sector="CONUS"),
+            gw.Pipeline(name="b", satellite="GOES19", sector="FD"),
         )
 
-    def test_rotate_mode_uses_the_upcoming_combo_not_the_last_fetched_one(self):
-        combos = self._combos()
-        cfg = gw.Config(combo_mode="rotate", combos=combos)
-        # combo_rotation_index=1 means run_once_rotate just fetched combos[0] and
-        # advanced the index to point at combos[1] for next cycle.
+    def test_rotate_mode_uses_the_upcoming_pipeline_not_the_last_fetched_one(self):
+        pipelines = self._pipelines()
+        cfg = gw.Config(pipeline_mode="rotate", pipelines=pipelines)
+        # pipeline_rotation_name="a" means run_once_rotate just showed pipelines[0];
+        # the upcoming one is pipelines[1].
         state = {
-            "combo_rotation_index": 1,
-            "last_source_key": gw.resolve_source(cfg, combos[0]).key,
+            "pipeline_rotation_name": "a",
+            "last_source_key": gw.resolve_source(cfg, pipelines[0]).key,
         }
         key = gw._next_cycle_source_key(cfg, state)
-        assert key == gw.resolve_source(cfg, combos[1]).key
+        assert key == gw.resolve_source(cfg, pipelines[1]).key
         assert key != state["last_source_key"]
 
-    def test_rotate_mode_wraps_the_index(self):
-        combos = self._combos()
-        cfg = gw.Config(combo_mode="rotate", combos=combos)
-        state = {"combo_rotation_index": 0}  # wrapped back to the first combo
-        assert gw._next_cycle_source_key(cfg, state) == gw.resolve_source(cfg, combos[0]).key
+    def test_rotate_mode_wraps_around_the_end_of_the_list(self):
+        pipelines = self._pipelines()
+        cfg = gw.Config(pipeline_mode="rotate", pipelines=pipelines)
+        state = {"pipeline_rotation_name": "b"}  # last pipeline shown -> wraps to the first
+        assert gw._next_cycle_source_key(cfg, state) == gw.resolve_source(cfg, pipelines[0]).key
+
+    def test_rotate_mode_defaults_to_the_first_pipeline_when_name_is_unknown(self):
+        # First run (no state yet), or the previously-shown pipeline was renamed/
+        # removed since -- either way, falls back to pipelines[0].
+        pipelines = self._pipelines()
+        cfg = gw.Config(pipeline_mode="rotate", pipelines=pipelines)
+        assert gw._next_cycle_source_key(cfg, {}) == gw.resolve_source(cfg, pipelines[0]).key
+        assert gw._next_cycle_source_key(cfg, {"pipeline_rotation_name": "gone"}) == gw.resolve_source(cfg, pipelines[0]).key
 
     def test_single_mode_uses_last_source_key(self):
-        cfg = gw.Config(combo_mode="single")
+        cfg = gw.Config(pipeline_mode="single")
         state = {"last_source_key": "some/source/key"}
         assert gw._next_cycle_source_key(cfg, state) == "some/source/key"
 
@@ -228,5 +237,5 @@ class TestNextCycleSourceKey:
         # run_once_per_monitor never writes last_source_key (several sources are
         # fetched per cycle, no single one to name) -- falls back to clock-boundary
         # alignment via the None here, same as an empty/fresh state.
-        cfg = gw.Config(combo_mode="per_monitor", combos=self._combos())
+        cfg = gw.Config(pipeline_mode="per_monitor", pipelines=self._pipelines())
         assert gw._next_cycle_source_key(cfg, {}) is None

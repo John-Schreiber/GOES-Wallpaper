@@ -28,12 +28,12 @@ or keeping in mind:
 A few non-obvious things learned while building and testing this, not really
 "gaps" but easy to waste time rediscovering:
 
-- **`combo_mode = "per_monitor"` has been verified against real multi-monitor
+- **`pipeline_mode = "per_monitor"` has been verified against real multi-monitor
   hardware**, not just code review — worth knowing since it's easy to test this only
   via reasoning about `GetSystemMetrics`/`IDesktopWallpaper` calls otherwise.
 - **`IDesktopWallpaper` can report stale monitor device paths** for a display that's
   no longer connected (errors on `GetMonitorRECT`). `_list_active_monitors()` already
-  skips entries that error, so `combo.monitor` indices refer to the *active*
+  skips entries that error, so `pipeline.monitor` indices refer to the *active*
   enumeration order, not the raw `GetMonitorDevicePathAt` index — worth remembering
   if a setup's monitor numbering looks off.
 - **The georeferencing calibration is hardcoded, not self-updating.** The GEOS extent
@@ -50,7 +50,7 @@ A few non-obvious things learned while building and testing this, not really
    but hasn't been checked against Full Disk or Mesoscale sectors, which may render
    NOAA's caption bar at a different relative size.
 3. **`span_all_monitors` (one image spanned across all monitors) is unverified
-   visually** — unlike `combo_mode = "per_monitor"` (verified live against real
+   visually** — unlike `pipeline_mode = "per_monitor"` (verified live against real
    hardware), this path was only checked by reading the `GetSystemMetrics(78/79)`
    call. `avoid_taskbar` has a related caveat there: it assumes the taskbar sits at
    the bottom of the rendered image, which may not hold for a spanned virtual-desktop
@@ -67,53 +67,6 @@ A few non-obvious things learned while building and testing this, not really
    bundled offline dataset (no network dependency, another thing to vendor/maintain)
    vs. a geocoding API call (network dependency, rate limits, offline behavior needs
    deciding).
-8. **Improve GeoJSON rendering: anti-aliasing, polygon fill, custom icons,
-   simplestyle-spec property names.** Tracked in
-   [issue #17](https://github.com/John-Schreiber/GOES-Wallpaper/issues/17).
-   `_build_geojson_layer`/`_draw_lonlat_run`
-   (`goes_wallpaper.py`) draw everything with raw `PIL.ImageDraw` — hard-edged (no
-   anti-aliasing) lines/circles, and `Polygon`/`MultiPolygon` rings are drawn as
-   closed *outlines only* (`OVERLAYS.md`: "not filled, no fill-color config") since
-   `ImageDraw.polygon(fill=...)` can't correctly handle interior rings (holes) via
-   even-odd winding. Points draw a plain outlined circle (`draw_point`) — no custom
-   icon support. Four related pieces, best landed together since they touch the same
-   drawing code:
-   - **Library: add `aggdraw`** (wraps Anti-Grain Geometry, MIT, pip-installable,
-     draws directly onto PIL `Image` objects) for the rasterization step only — leave
-     the existing `pyproj`/`numpy` projection pipeline untouched (`lonlat_to_pixels`
-     is already validated against `pyresample` + landmark cities; nothing about it
-     needs to change). Swap the `ImageDraw.line`/`ellipse`/`polygon` calls in
-     `_build_geojson_layer`/`_draw_lonlat_run` for `aggdraw.Path` + `Draw.line`/
-     `ellipse` calls. Buys anti-aliased strokes and correct even-odd polygon fill in
-     one small dependency, instead of pulling in shapely/GDAL for a problem that's
-     really "PIL's rasterizer is too primitive," not "we need real vector geometry
-     ops."
-   - **Fill support**: add `fill`/`fill_opacity` to `GeoJSONSource`/`ShellSource`
-     (mirroring `color`/`opacity`), and honor `properties.fill`/
-     `properties.fill-opacity` per feature (see simplestyle note below). Draw each
-     `Polygon`'s rings as one `aggdraw.Path` with even-odd fill so interior rings
-     (e.g. a country polygon with a lake cut out) render as real holes, not solid
-     fill.
-   - **Custom icons for points**: add an `icon` field to `GeoJSONSource`/
-     `ShellSource` (a path to a small PNG) plus a per-feature `properties.icon`
-     override, resolved the same way `properties.color`/`properties.name` already
-     are (`_resolve_feature_color` is the pattern to follow). `draw_point` pastes the
-     icon via `Image.alpha_composite` at the projected pixel instead of/alongside
-     the current outlined-circle fallback when no icon is set. This absorbs the
-     older, narrower version of this item (icons only, no fill/anti-aliasing).
-   - **Styling: align property names with the Mapbox/GitHub simplestyle-spec**
-     (`stroke`/`stroke-width`/`stroke-opacity`/`fill`/`fill-opacity`/
-     `marker-color`/`marker-size`) instead of the current ad hoc `properties.color`.
-     `_resolve_feature_color`'s docstring already justifies parsing hex/named colors
-     specifically because that's "what geojson.io/simplestyle-spec actually emit"
-     (`goes_wallpaper.py:1441`) — this just finishes that alignment so GeoJSON
-     exported from geojson.io or similar tools works without hand-editing property
-     names. `marker-symbol` (a maki icon ID/single-char in the real spec) doesn't fit
-     an arbitrary-raster-icon use case, so keep the custom `icon`/`properties.icon`
-     path above as a deliberate extension beyond the spec rather than trying to
-     overload `marker-symbol`.
-   Independent of item 16 (per-combo overlays) and item 18 (area-aware overlays) —
-   can land before, after, or interleaved with either.
 9. ~~**Plugin interface for overlays**~~ Partially done: `geojson_sources`/
    `shell_sources` (`overlays.toml`, see `OVERLAYS.md`) are now repeatable, named,
    independently-styled lists — multiple static GeoJSON file sets and/or multiple
@@ -131,14 +84,14 @@ A few non-obvious things learned while building and testing this, not really
     `qdbus6` `evaluateScript` scripting and `plasma-apply-wallpaperimage`) was built
     from KDE's own docs and working community examples — see the module docstring
     for sources. A live run against a real Plasma session confirmed the default
-    (single-screen, `combo_mode = "single"`) path end to end: `get_screen_size()`
+    (single-screen, `pipeline_mode = "single"`) path end to end: `get_screen_size()`
     detection and `apply_wallpaper()` were exercised for real, and the desktop's
     `org.kde.image` config (queried directly via `qdbus6 ... evaluateScript`) showed
     it pointing at the freshly-rendered file after each run. Confirms the interface
     shape is workable for a second OS (`WallpaperPlatform`'s abstract methods all had
     a reasonable KDE implementation, including the "not every style is supported"
     escape hatch the docstring anticipated — KDE has no equivalent of Windows'
-    `span`), but `per_monitor` combo mode, real multi-monitor geometry/assignment,
+    `span`), but `per_monitor` pipeline mode, real multi-monitor geometry/assignment,
     panel-height detection against an actual panel, and `upower`/`nmcli` parsing on
     real hardware are all still outstanding — only exercised via the unit tests'
     mocked subprocess output so far, not a live multi-monitor/battery/metered-network
@@ -177,7 +130,7 @@ A few non-obvious things learned while building and testing this, not really
       Windows Spotlight or slideshow lock-screen modes weren't tested and may not
       show the set image without the user switching to "Picture" mode first — not
       handled or detected by `apply_lock_screen()` yet.
-    - **combo_mode = "per_monitor"**: intentionally unsupported —
+    - **pipeline_mode = "per_monitor"/"files"**: intentionally unsupported —
       `validate_lock_screen()` raises at startup if `set_lock_screen = true` is
       paired with it, since there's no per-monitor lock screen concept to map
       per-monitor assignments onto.
@@ -196,7 +149,7 @@ A few non-obvious things learned while building and testing this, not really
       without risking an un-unlockable session, whenever someone has a Plasma box
       to try it on.
     - **Explicitly decided against for now: independent lock screen
-      configurability.** Considered giving `set_lock_screen` its own combo-like
+      configurability.** Considered giving `set_lock_screen` its own pipeline-like
       config (satellite/sector/crop/style, or at minimum an independent crop for a
       portrait-oriented framing instead of the desktop's landscape cover-crop) —
       deferred. Current behavior always mirrors `cfg.wallpaper_path` exactly, same
@@ -206,9 +159,9 @@ A few non-obvious things learned while building and testing this, not really
       `run_once_rotate`) for the lock screen's independent crop/render, rather than
       triggering a second network fetch — the point is an extra `PIL` crop+resize
       pass on data already in memory, not doubling `source_kind = "satpy_raw"`'s
-      already-heavy per-cycle bandwidth. A full independent combo (different
+      already-heavy per-cycle bandwidth. A full independent pipeline (different
       satellite/sector entirely) would be a further step beyond that and fetch
-      separately, same as any other combo does today.
+      separately, same as any other pipeline does today.
     - **macOS**: not investigated at all — no equivalent gap entry existed before,
       and still doesn't. Note: macOS's actual lock screen and the login-window
       background are two different things; whichever this eventually targets needs
@@ -222,51 +175,33 @@ A few non-obvious things learned while building and testing this, not really
     doesn't handle cleanly — would need dedicated testing, possibly a documented
     fallback (skip power/network detection gracefully) if freezing that dependency
     turns out to be unreliable.
-15. ~~**Improve config orthogonality/composability.**~~ Done, and went further than
-    originally scoped: the three separately-prefixed copies of the overlay style
-    shape (`overlay_city_*`/`overlay_shell_*`/`overlay_geojson_*`) are now one
-    `GeoJSONSource`/`ShellSource` shape (color/line_width/marker_radius/opacity/
-    font_size), each entry independently styled. City markers didn't just get
-    re-styled onto the shared shape — `overlay_cities`/`CityMarker`/
-    `draw_city_markers` were deleted outright; a city is now a `Point` feature with
-    `properties.name` in a plain GeoJSON file (`overlays/cities.geojson`), drawn
-    through the exact same `geojson_sources` path as any other static content, one
-    fewer parallel mechanism rather than a fourth copy of the style shape. The
-    composability half landed too (see item 9): `geojson_sources`/`shell_sources`
-    are now repeatable lists, not one hardcoded slot each. Whole thing moved to its
-    own file, `overlays.toml` (not `config.toml`), since it's content, not app
-    behavior — see `OVERLAYS.md`. The broader pass over `Config` for the same
-    prefix-family pattern elsewhere (`combo_*`/`source_crop_*`) is still open, and
-    now scoped smaller since overlays (the biggest instance, 21 of ~70 fields) are
-    out of `Config` entirely.
-16. **Per-combo overlay scoping.** `overlays.toml` (`geojson_sources`/
-    `shell_sources`/`graticule`) is loaded once and passed to every combo's render
-    the same way — `EffectiveSource`/`Combo` carry no overlay fields at all, unlike
-    `satellite`/`sector`/`product`/`resolution`, which each combo *can* override
-    (`combo.satellite or cfg.satellite`, see `resolve_source()`). So in `"rotate"`/
-    `"per_monitor"` mode, every combo gets the exact same overlays today — there's no
-    way to say "GOES18 CONUS GEOCOLOR gets city markers" and "GOES19 CONUS Band 13
-    gets the live storm-track overlay" as two different combos, only all-or-nothing.
-    - **Decided: additive, not override.** The overlays.toml config stays a *global*
-      overlay set that always applies to every combo (today's behavior, unchanged —
-      `combo_mode = "single"` or any combo that doesn't care about overlays needs
-      zero new config). Each `Combo` can *additionally* carry its own extra overlay
-      content that layers on top *only* for that specific combo — e.g. every combo
-      gets the global graticule, but only the GOES19 storm-track combo also gets
-      that particular shell source's output composited on top of it. Not a
-      per-combo override/replacement of the global set — both draw, global first,
-      combo-specific second.
-    - The config shape decision this needs got easier since the multi-source work
-      (item 9): a combo could carry a list of `geojson_sources`/`shell_sources`
-      *names* to additionally draw (referencing entries already defined in
-      `overlays.toml`), rather than needing its own inline style fields — avoids
-      re-opening the field-family duplication item 15 just fixed. Still needs
-      deciding how a combo-specific reference composes with the global set in the
-      cache key (each `GeoJSONSource`'s cache entry is already keyed on that
-      source's own `name`, so a combo-specific *additional* source composites as its
-      own independent cache entry, layered on top — no new cache-key work needed
-      there, unlike when this item was originally scoped against the old
-      single-slot-per-provider shape).
+16. **Per-pipeline overlay scoping.** `overlays.toml` (`geojson_sources`/
+    `shell_sources`/`graticule`) is loaded once and passed to every pipeline's
+    render the same way — `EffectiveSource`/`Pipeline` carry no overlay fields at
+    all. So in `"rotate"`/`"per_monitor"` mode, every pipeline gets the exact same
+    overlays — there's no way to say "GOES18 CONUS GEOCOLOR gets city markers" and
+    "GOES19 CONUS Band 13 gets the live storm-track overlay" as two different
+    pipelines, only all-or-nothing.
+    - **Decided: additive, not override.** The overlays.toml config stays a
+      *global* overlay set that always applies to every pipeline (today's
+      behavior, unchanged — `pipeline_mode = "single"` or any pipeline that
+      doesn't care about overlays needs zero new config). Each `Pipeline` can
+      *additionally* carry its own extra overlay content that layers on top
+      *only* for that specific pipeline — e.g. every pipeline gets the global
+      graticule, but only the GOES19 storm-track pipeline also gets that
+      particular shell source's output composited on top of it. Not a
+      per-pipeline override/replacement of the global set — both draw, global
+      first, pipeline-specific second.
+    - The config shape decision this needs: a pipeline could carry a list of
+      `geojson_sources`/`shell_sources` *names* to additionally draw (referencing
+      entries already defined in `overlays.toml`), rather than needing its own
+      inline style fields — avoids reintroducing the old per-provider style-field
+      duplication (`GeoJSONSource`/`ShellSource` are now one shared shape). Still
+      needs deciding how a pipeline-specific reference composes with the global
+      set in the cache key (each `GeoJSONSource`'s cache entry is already keyed
+      on that source's own `name`, so a pipeline-specific *additional* source
+      composites as its own independent cache entry, layered on top — no new
+      cache-key work needed there).
 18. **GeoJSON overlay providers aren't area-aware.** `geojson_sources`/
     `shell_sources` call `lonlat_to_pixels(satellite, ...)` directly, so on a
     `satpy_raw` Full Disk/Mesoscale frame — where `graticule` *does* work via the
@@ -297,7 +232,7 @@ A few non-obvious things learned while building and testing this, not really
 22. **A third backend now exists (`platform_macos.MacOSPlatform`) and single-monitor
     wallpaper apply is verified on real hardware**, the same milestone item 11
     documents for the KDE backend. A live run on a real MacBook with a single
-    (built-in) display confirmed the default (`combo_mode = "single"`) path end to
+    (built-in) display confirmed the default (`pipeline_mode = "single"`) path end to
     end: `get_screen_size()` detection, the Cocoa-bottom-up-to-top-down coordinate
     flip, and `apply_wallpaper()`'s `NSWorkspace.setDesktopImageURL_forScreen_
     options_error_` call and style mapping (including the "tile"/"span" → "fill"

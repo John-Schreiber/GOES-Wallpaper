@@ -2,6 +2,7 @@
 # Copyright (C) 2026 John-Schreiber
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import pytest
 from PIL import Image
 
 import goes_wallpaper as gw
@@ -65,3 +66,63 @@ class TestCropToScreen:
             img.putpixel((x, 0), (x, 0, 0))
         result = gw.crop_to_screen(img, (50, 100), 1.0)
         assert result.getpixel((49, 0))[0] == 99
+
+
+class TestApplyStyleToCanvas:
+    """apply_style_to_canvas bakes wallpaper_style onto a target canvas ourselves,
+    for pipeline_mode = "files" output -- there's no OS wallpaper renderer to
+    delegate this to for a plain file (see run_once_files)."""
+
+    def test_fill_matches_crop_to_screen(self):
+        img = make_image(2500, 1500)
+        result = gw.apply_style_to_canvas(img, "fill", 1920, 1080)
+        assert result.size == (1920, 1080)
+
+    def test_stretch_ignores_aspect_ratio(self):
+        img = make_image(1000, 500)
+        result = gw.apply_style_to_canvas(img, "stretch", 300, 300)
+        assert result.size == (300, 300)
+
+    def test_fit_preserves_aspect_ratio_and_pads_to_target_size(self):
+        img = Image.new("RGB", (1000, 500), (200, 100, 50))  # 2:1 aspect
+        result = gw.apply_style_to_canvas(img, "fit", 400, 400)
+        assert result.size == (400, 400)
+        # Scaled to fit width (400x200 at y=100..300), so top/bottom padding, not
+        # left/right.
+        assert result.getpixel((0, 0)) == (0, 0, 0)  # padding, above the scaled image
+        assert result.getpixel((200, 200)) == (200, 100, 50)  # inside the scaled image
+
+    def test_center_pads_a_smaller_image_onto_the_target_canvas(self):
+        img = Image.new("RGB", (10, 10), (200, 100, 50))
+        result = gw.apply_style_to_canvas(img, "center", 40, 40)
+        assert result.size == (40, 40)
+        assert result.getpixel((0, 0)) == (0, 0, 0)  # outside the centered image
+        assert result.getpixel((20, 20)) == (200, 100, 50)  # inside it
+
+    def test_center_crops_a_larger_image_to_the_target_canvas(self):
+        img = make_image(100, 100)
+        result = gw.apply_style_to_canvas(img, "center", 40, 40)
+        assert result.size == (40, 40)
+
+    def test_tile_repeats_the_image_across_the_canvas(self):
+        img = Image.new("RGB", (10, 10), (200, 100, 50))
+        result = gw.apply_style_to_canvas(img, "tile", 25, 15)
+        assert result.size == (25, 15)
+        # A 10x10 tile repeated across a 25x15 canvas covers every pixel (the last
+        # tile's paste clips at the canvas edge but still fills up to it).
+        assert result.getpixel((0, 0)) == (200, 100, 50)
+        assert result.getpixel((20, 10)) == (200, 100, 50)  # third tile column/row
+        assert result.getpixel((24, 14)) == (200, 100, 50)  # last (clipped) tile
+
+    def test_span_degrades_to_fill_and_logs_a_warning(self, caplog):
+        import logging
+        img = make_image(2500, 1500)
+        with caplog.at_level(logging.WARNING):
+            result = gw.apply_style_to_canvas(img, "span", 1920, 1080)
+        assert result.size == (1920, 1080)
+        assert any("span" in r.message for r in caplog.records)
+
+    def test_unknown_style_raises(self):
+        img = make_image(10, 10)
+        with pytest.raises(ValueError, match="Unknown wallpaper_style"):
+            gw.apply_style_to_canvas(img, "bogus", 10, 10)

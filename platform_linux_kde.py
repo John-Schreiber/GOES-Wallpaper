@@ -305,11 +305,14 @@ class KDEPlatform(WallpaperPlatform):
         monitors.sort(key=lambda m: m.left)
         return monitors
 
-    def apply_wallpaper_per_monitor(self, assignments: dict[str, Path], style: str) -> None:
+    def apply_wallpaper_per_monitor(self, assignments: dict[str, tuple[Path, str]]) -> None:
         if not assignments:
             return
-        _, fill_value = _FILL_MODES.get(style, _FILL_MODES["fill"])
-        if style == "span":
+        # Unlike Windows' IDesktopWallpaper.SetPosition (whole-desktop only), this
+        # backend's D-Bus payload already carries one entry per screen, so each
+        # monitor's own style resolves independently right here -- real per-monitor
+        # style, not a single shared one.
+        if any(style == "span" for _, style in assignments.values()):
             logging.warning(
                 "KDE has no native multi-monitor wallpaper-spanning primitive; "
                 "falling back to 'fill' (cover-crop) instead of 'span'."
@@ -318,8 +321,8 @@ class KDEPlatform(WallpaperPlatform):
         # mon_id round-trips through list_monitors()'s str(screen index) ids --
         # this method only ever receives ids this backend itself produced.
         payload = [
-            {"screen": int(mon_id), "path": str(path), "fillMode": fill_value}
-            for mon_id, path in assignments.items()
+            {"screen": int(mon_id), "path": str(path), "fillMode": _FILL_MODES.get(style, _FILL_MODES["fill"])[1]}
+            for mon_id, (path, style) in assignments.items()
         ]
         script = (
             f"var assignments = {json.dumps(payload)};"

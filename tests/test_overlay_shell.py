@@ -9,6 +9,7 @@ any script existing on disk or on real network access."""
 
 import json
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -96,6 +97,106 @@ class TestResolveFeatureColor:
 
     def test_unexpected_type_uses_default(self):
         assert gw._resolve_feature_color(3.14, self.DEFAULT) == self.DEFAULT
+
+
+class TestResolveFillColor:
+    def test_no_property_falls_back_to_entry_default(self):
+        assert gw._resolve_fill_color(None, (1, 2, 3)) == (1, 2, 3)
+
+    def test_no_property_and_no_entry_default_stays_none(self):
+        assert gw._resolve_fill_color(None, None) is None
+
+    def test_property_fill_overrides_entry_default(self):
+        assert gw._resolve_fill_color([9, 8, 7], (1, 2, 3)) == (9, 8, 7)
+
+    def test_property_fill_opts_in_even_with_no_entry_default(self):
+        assert gw._resolve_fill_color("red", None) == (255, 0, 0)
+
+    def test_unparseable_property_fill_with_no_entry_default_falls_back_to_white(self):
+        # The feature explicitly asked for *some* fill; falling all the way back to
+        # "no fill" over an unparseable value would silently drop that intent.
+        assert gw._resolve_fill_color("not-a-real-color", None) == (255, 255, 255)
+
+
+class TestResolveOpacity:
+    def test_none_uses_default(self):
+        assert gw._resolve_opacity(None, 160) == 160
+
+    @pytest.mark.parametrize("value, expected", [(0.0, 0), (1.0, 255), (0.5, 128)])
+    def test_valid_range_converts_to_0_255(self, value, expected):
+        assert gw._resolve_opacity(value, 160) == expected
+
+    def test_string_number_is_accepted(self):
+        assert gw._resolve_opacity("0.5", 160) == 128
+
+    @pytest.mark.parametrize("value", [-0.1, 1.1, 5])
+    def test_out_of_range_uses_default(self, value):
+        assert gw._resolve_opacity(value, 160) == 160
+
+    def test_unparseable_uses_default(self):
+        assert gw._resolve_opacity("not-a-number", 160) == 160
+
+
+class TestResolveMarkerSizeMultiplier:
+    def test_none_is_1x(self):
+        assert gw._resolve_marker_size_multiplier(None) == 1.0
+
+    @pytest.mark.parametrize("size, multiplier", [("small", 0.6), ("medium", 1.0), ("large", 1.6)])
+    def test_known_sizes(self, size, multiplier):
+        assert gw._resolve_marker_size_multiplier(size) == multiplier
+
+    def test_unrecognized_value_is_1x(self):
+        assert gw._resolve_marker_size_multiplier("huge") == 1.0
+
+
+class TestResolveIconPath:
+    def test_none_or_empty_resolves_to_none(self):
+        assert gw._resolve_icon_path(None) is None
+        assert gw._resolve_icon_path("") is None
+
+    def test_bundled_name_resolves_and_is_flagged_bundled(self):
+        resolved = gw._resolve_icon_path("marker")
+        assert resolved is not None
+        path, is_bundled = resolved
+        assert path.name == "marker.png"
+        assert is_bundled is True
+
+    def test_custom_path_resolves_and_is_not_flagged_bundled(self, tmp_path):
+        icon_path = tmp_path / "custom.png"
+        Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(icon_path)
+        resolved = gw._resolve_icon_path(str(icon_path))
+        assert resolved == (icon_path, False)
+
+    def test_unrecognized_name_and_missing_path_resolves_to_none(self):
+        assert gw._resolve_icon_path("definitely-not-a-bundled-icon-or-file") is None
+
+
+class TestResolveFeatureIcon:
+    def test_no_properties_falls_back_to_entry_icon(self):
+        entry = (Path("entry.png"), False)
+        assert gw._resolve_feature_icon({}, entry) == entry
+
+    def test_no_properties_and_no_entry_icon_stays_none(self):
+        assert gw._resolve_feature_icon({}, None) is None
+
+    def test_properties_icon_bundled_name_overrides_entry(self):
+        resolved = gw._resolve_feature_icon({"icon": "star"}, (Path("entry.png"), False))
+        assert resolved is not None
+        assert resolved[0].name == "star.png"
+        assert resolved[1] is True
+
+    def test_properties_marker_symbol_resolves_against_bundled_set(self):
+        resolved = gw._resolve_feature_icon({"marker-symbol": "fire-station"}, None)
+        assert resolved == (gw._bundled_icons()["fire-station"], True)
+
+    def test_properties_icon_takes_precedence_over_marker_symbol(self):
+        resolved = gw._resolve_feature_icon({"icon": "star", "marker-symbol": "fire-station"}, None)
+        assert resolved[0].name == "star.png"
+
+    def test_unrecognized_marker_symbol_is_ignored_falls_back_to_entry(self):
+        entry = (Path("entry.png"), False)
+        resolved = gw._resolve_feature_icon({"marker-symbol": "not-a-real-maki-icon"}, entry)
+        assert resolved == entry
 
 
 class TestDrawGeojsonOverlay:
@@ -250,6 +351,187 @@ class TestDrawGeojsonOverlay:
         geojson = {"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [-122.42, 37.77]}}
         out = gw.draw_geojson_overlay(img, "GOES16", geojson, (255, 0, 0), 2, 5, 200)
         assert self._nonblack_pixel_count(out) == 0
+
+    def test_polygon_default_has_no_fill(self):
+        # Unchanged default behavior: fill=None (never set) still means
+        # outline-only, same as before fill support existed.
+        img = self._blank()
+        geojson = {
+            "type": "Feature", "properties": {},
+            "geometry": {"type": "Polygon", "coordinates": [[[-108, 40], [-107, 40], [-107, 39], [-108, 39]]]},
+        }
+        out = gw.draw_geojson_overlay(img, "GOES18", geojson, (0, 200, 255), 2, 5, 255)
+        arr = np.array(out)
+        # A filled square would light up a large contiguous interior; outline-only
+        # should only light up a thin border -- well under 50% of the bbox area.
+        ys, xs = np.where(arr.sum(axis=2) > 0)
+        bbox_area = (xs.max() - xs.min() + 1) * (ys.max() - ys.min() + 1)
+        assert len(xs) < 0.5 * bbox_area
+
+    def test_polygon_with_fill_fills_the_interior(self):
+        img = self._blank()
+        geojson = {
+            "type": "Feature", "properties": {},
+            "geometry": {"type": "Polygon", "coordinates": [[[-108, 40], [-107, 40], [-107, 39], [-108, 39]]]},
+        }
+        out = gw.draw_geojson_overlay(
+            img, "GOES18", geojson, (0, 200, 255), 2, 5, 255, fill=(200, 0, 0), fill_opacity=255,
+        )
+        arr = np.array(out)
+        ys, xs = np.where(arr.sum(axis=2) > 0)
+        bbox_area = (xs.max() - xs.min() + 1) * (ys.max() - ys.min() + 1)
+        # The projected quadrilateral is rotated/skewed relative to the pixel grid
+        # (GEOS projection distortion), so even a fully solid fill doesn't cover
+        # 100% of its own axis-aligned bounding box -- comfortably above the
+        # outline-only case's <50% is enough to distinguish "filled" from "not".
+        assert len(xs) > 0.55 * bbox_area
+
+    def test_polygon_with_hole_leaves_the_hole_unfilled(self):
+        img = self._blank()
+        # A big outer square with a smaller inner square (opposite winding) as a hole.
+        geojson = {
+            "type": "Feature", "properties": {},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [
+                    [[-110, 42], [-104, 42], [-104, 36], [-110, 36]],  # exterior, CCW-ish in lon/lat
+                    [[-108, 40], [-108, 38], [-106, 38], [-106, 40]],  # hole, opposite winding
+                ],
+            },
+        }
+        out = gw.draw_geojson_overlay(
+            img, "GOES18", geojson, (0, 200, 255), 2, 5, 255, fill=(200, 0, 0), fill_opacity=255,
+        )
+        arr = np.array(out)
+        hole_col, hole_row = gw.lonlat_to_pixels("GOES18", np.array([-107.0]), np.array([39.0]), 2500, 1500)
+        outer_col, outer_row = gw.lonlat_to_pixels("GOES18", np.array([-109.0]), np.array([41.0]), 2500, 1500)
+        assert tuple(arr[round(hole_row[0]), round(hole_col[0])]) == (0, 0, 0)  # inside the hole: untouched
+        assert arr[round(outer_row[0]), round(outer_col[0])].sum() > 0  # in the annulus: filled
+
+    def test_property_fill_overrides_entry_fill(self):
+        img = self._blank()
+        geojson = {
+            "type": "Feature", "properties": {"fill": [0, 255, 0]},
+            "geometry": {"type": "Polygon", "coordinates": [[[-108, 40], [-107, 40], [-107, 39], [-108, 39]]]},
+        }
+        out = gw.draw_geojson_overlay(
+            img, "GOES18", geojson, (0, 200, 255), 2, 5, 255, fill=(200, 0, 0), fill_opacity=255,
+        )
+        drawn_colors = {tuple(c) for c in np.array(out)[np.array(out).sum(axis=2) > 0].tolist()}
+        assert (0, 255, 0) in drawn_colors
+        assert (200, 0, 0) not in drawn_colors
+
+    def test_simplestyle_stroke_overrides_legacy_color(self):
+        img = self._blank()
+        geojson = {
+            "type": "Feature", "properties": {"stroke": "lime", "color": "red"},
+            "geometry": {"type": "Point", "coordinates": [-122.42, 37.77]},
+        }
+        out = gw.draw_geojson_overlay(img, "GOES18", geojson, (0, 0, 255), 2, 5, 255)
+        drawn_colors = {tuple(c) for c in np.array(out)[np.array(out).sum(axis=2) > 0].tolist()}
+        assert (0, 255, 0) in drawn_colors  # "lime"
+        assert (255, 0, 0) not in drawn_colors  # legacy "color" ignored when stroke is set
+
+    def test_legacy_color_still_works_without_stroke(self):
+        img = self._blank()
+        geojson = {
+            "type": "Feature", "properties": {"color": "red"},
+            "geometry": {"type": "Point", "coordinates": [-122.42, 37.77]},
+        }
+        out = gw.draw_geojson_overlay(img, "GOES18", geojson, (0, 0, 255), 2, 5, 255)
+        drawn_colors = {tuple(c) for c in np.array(out)[np.array(out).sum(axis=2) > 0].tolist()}
+        assert (255, 0, 0) in drawn_colors
+
+    def test_marker_color_takes_precedence_over_stroke_for_points(self):
+        img = self._blank()
+        geojson = {
+            "type": "Feature", "properties": {"marker-color": "lime", "stroke": "red"},
+            "geometry": {"type": "Point", "coordinates": [-122.42, 37.77]},
+        }
+        out = gw.draw_geojson_overlay(img, "GOES18", geojson, (0, 0, 255), 2, 5, 255)
+        drawn_colors = {tuple(c) for c in np.array(out)[np.array(out).sum(axis=2) > 0].tolist()}
+        assert (0, 255, 0) in drawn_colors
+
+    def test_marker_size_large_draws_more_than_small(self):
+        small = gw.draw_geojson_overlay(
+            self._blank(), "GOES18",
+            {"type": "Feature", "properties": {"marker-size": "small"}, "geometry": {"type": "Point", "coordinates": [-122.42, 37.77]}},
+            (255, 0, 0), 2, 5, 255,
+        )
+        large = gw.draw_geojson_overlay(
+            self._blank(), "GOES18",
+            {"type": "Feature", "properties": {"marker-size": "large"}, "geometry": {"type": "Point", "coordinates": [-122.42, 37.77]}},
+            (255, 0, 0), 2, 5, 255,
+        )
+        assert self._nonblack_pixel_count(large) > self._nonblack_pixel_count(small)
+
+    def test_stroke_opacity_is_a_0_to_1_float_not_0_to_255(self):
+        opaque = gw.draw_geojson_overlay(
+            self._blank(), "GOES18",
+            {"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [-122.42, 37.77]}},
+            (255, 0, 0), 2, 5, 255,
+        )
+        faint = gw.draw_geojson_overlay(
+            self._blank(), "GOES18",
+            {"type": "Feature", "properties": {"stroke-opacity": 0.1}, "geometry": {"type": "Point", "coordinates": [-122.42, 37.77]}},
+            (255, 0, 0), 2, 5, 255,
+        )
+        col, row = gw.lonlat_to_pixels("GOES18", np.array([-122.42]), np.array([37.77]), 2500, 1500)
+        # Sum intensity over a box around the marker circle (rather than one exact
+        # pixel) so this isn't sensitive to which pixel the anti-aliased stroke
+        # happens to land on.
+        radius = round(5 * max(1.0, 2500 / 2000)) + 2
+        c, r = round(col[0]), round(row[0])
+        box = np.s_[r - radius:r + radius, c - radius:c + radius]
+        assert np.array(opaque)[box].sum() > np.array(faint)[box].sum()
+
+    def test_icon_replaces_the_outlined_circle(self):
+        # Composite over red so we can tell "was an outlined circle stroke drawn"
+        # (the base background color would remain pure red at the ring) apart from
+        # "was an icon pasted" (the icon's own opaque pixels, tinted with the
+        # marker color since it's a bundled icon).
+        img = Image.new("RGB", (2500, 1500), (0, 0, 0))
+        geojson = {
+            "type": "Feature", "properties": {"icon": "marker"},
+            "geometry": {"type": "Point", "coordinates": [-122.42, 37.77]},
+        }
+        with_icon = gw.draw_geojson_overlay(img, "GOES18", geojson, (0, 255, 0), 2, 20, 255)
+        geojson["properties"] = {}
+        without_icon = gw.draw_geojson_overlay(img, "GOES18", geojson, (0, 255, 0), 2, 20, 255)
+        # Both draw *something*, but a pasted icon (a filled silhouette) covers far
+        # more pixels than a thin circle outline at the same radius.
+        assert self._nonblack_pixel_count(with_icon) > self._nonblack_pixel_count(without_icon)
+
+    def test_unrecognized_icon_falls_back_to_outlined_circle(self):
+        geojson = {
+            "type": "Feature", "properties": {"icon": "not-a-real-icon-or-path"},
+            "geometry": {"type": "Point", "coordinates": [-122.42, 37.77]},
+        }
+        out = gw.draw_geojson_overlay(self._blank(), "GOES18", geojson, (255, 0, 0), 2, 5, 255)  # must not raise
+        assert self._nonblack_pixel_count(out) > 0
+
+    def test_marker_symbol_resolves_a_bundled_icon(self):
+        geojson = {
+            "type": "Feature", "properties": {"marker-symbol": "star"},
+            "geometry": {"type": "Point", "coordinates": [-122.42, 37.77]},
+        }
+        with_symbol = gw.draw_geojson_overlay(self._blank(), "GOES18", geojson, (255, 0, 0), 2, 20, 255)
+        geojson["properties"] = {}
+        without_symbol = gw.draw_geojson_overlay(self._blank(), "GOES18", geojson, (255, 0, 0), 2, 20, 255)
+        assert self._nonblack_pixel_count(with_symbol) > self._nonblack_pixel_count(without_symbol)
+
+    def test_line_edge_has_partially_blended_alpha_not_just_hard_0_or_255(self):
+        # Smoke check for anti-aliasing (aggdraw/AGG) replacing PIL ImageDraw's
+        # hard-edged rasterization -- a diagonal line should have at least one
+        # partially-covered edge pixel, not just fully-on/fully-off coverage.
+        img = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+        draw = gw.aggdraw.Draw(img)
+        pen = gw.aggdraw.Pen((255, 0, 0), 3, 255)
+        draw.line((10, 10, 190, 150), pen)  # a non-axis-aligned diagonal
+        draw.flush()
+        alphas = np.array(img)[..., 3]
+        distinct = np.unique(alphas)
+        assert ((distinct > 0) & (distinct < 255)).any()
 
     def test_end_to_end_shell_command_to_render(self):
         payload = {

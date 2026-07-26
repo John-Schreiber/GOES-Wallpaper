@@ -216,20 +216,31 @@ class TestApplyWallpaperPerMonitor:
     def test_noop_on_empty_assignments(self):
         platform = klink.KDEPlatform()
         with patch("subprocess.run") as run:
-            platform.apply_wallpaper_per_monitor({}, "fill")
+            platform.apply_wallpaper_per_monitor({})
         run.assert_not_called()
 
     def test_builds_script_with_screen_indices_and_fill_mode(self):
         platform = klink.KDEPlatform()
-        assignments = {"0": Path("/tmp/a.jpg"), "1": Path("/tmp/b.jpg")}
+        assignments = {"0": (Path("/tmp/a.jpg"), "tile"), "1": (Path("/tmp/b.jpg"), "tile")}
         with patch("shutil.which", return_value="/usr/bin/qdbus6"), \
              patch("subprocess.run", return_value=_completed(stdout="")) as run:
-            platform.apply_wallpaper_per_monitor(assignments, "tile")
+            platform.apply_wallpaper_per_monitor(assignments)
         script = run.call_args[0][0][-1]
         payload_json = script.split("var assignments = ", 1)[1].split(";", 1)[0]
         payload = json.loads(payload_json)
         assert {p["screen"] for p in payload} == {0, 1}
         assert all(p["fillMode"] == 3 for p in payload)
+
+    def test_honors_a_distinct_style_per_monitor(self):
+        platform = klink.KDEPlatform()
+        assignments = {"0": (Path("/tmp/a.jpg"), "fill"), "1": (Path("/tmp/b.jpg"), "tile")}
+        with patch("shutil.which", return_value="/usr/bin/qdbus6"), \
+             patch("subprocess.run", return_value=_completed(stdout="")) as run:
+            platform.apply_wallpaper_per_monitor(assignments)
+        script = run.call_args[0][0][-1]
+        payload_json = script.split("var assignments = ", 1)[1].split(";", 1)[0]
+        payload = {p["screen"]: p["fillMode"] for p in json.loads(payload_json)}
+        assert payload == {0: 2, 1: 3}  # "fill" -> preserveAspectCrop (2), "tile" -> tile (3)
 
 
 class TestGetPowerState:

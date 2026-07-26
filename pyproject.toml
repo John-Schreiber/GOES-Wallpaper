@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "goes-wallpaper"
-version = "2.3.0"
+version = "2.4.0"
 description = "Update your desktop wallpaper (Windows, KDE Plasma, or macOS) to the latest GOES satellite image"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
@@ -21,6 +21,7 @@ dependencies = [
     "winrt-windows-storage>=3.2.1; sys_platform == 'win32'",
     "winrt-windows-foundation>=3.2.1; sys_platform == 'win32'",
     "pyobjc-framework-Cocoa>=10.3.1; sys_platform == 'darwin'",
+    "aggdraw>=1.4.1",
 ]
 
 [project.optional-dependencies]
@@ -65,6 +66,9 @@ goes-wallpaperw = "goes_wallpaper:main"
 dev = [
     "types-requests",
     "pytest>=9.1.1",
+    "svglib>=2.0.2",
+    "reportlab>=5.0.0",
+    "rlpycairo>=0.4.0",
 ]
 
 [tool.pytest.ini_options]
@@ -83,4 +87,8 @@ include = [
     "platform_macos.py",
     "platform_render.py",
     "source_satpy.py",
+    # Bundled Maki-derived point icons (_BUNDLED_ICONS in goes_wallpaper.py) --
+    # rasterized from vendor/maki/ by scripts/rasterize_maki_icons.py, resolved
+    # relative to goes_wallpaper.py at runtime, so these need to ship too.
+    "overlays/icons/*.png",
 ]

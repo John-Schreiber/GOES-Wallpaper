@@ -21,7 +21,9 @@ if sys.platform != "win32":
     pytest.skip("Windows-only: platform_windows.py imports comtypes/winrt", allow_module_level=True)
 
 import ctypes
-from unittest.mock import patch
+import logging
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import platform_windows as pw
 
@@ -77,3 +79,41 @@ class TestGetTaskbarHeight:
         with patch.object(ctypes.windll.user32, "FindWindowW", lambda *a: 12345):
             with patch.object(ctypes.windll.shell32, "SHAppBarMessage", lambda *a: 0):
                 assert platform.get_taskbar_height() == 0
+
+
+class TestApplyWallpaperPerMonitor:
+    """IDesktopWallpaper.SetPosition sets style for the whole desktop -- there's no
+    per-monitor equivalent -- so unlike KDE/macOS (real per-screen style APIs),
+    Windows can only apply one style per call. These confirm the degradation picks
+    one style and still sets every monitor's wallpaper, warning when the assigned
+    pipelines' styles actually differ."""
+
+    def test_noop_on_empty_assignments(self, platform):
+        with patch("comtypes.client.CreateObject") as create:
+            platform.apply_wallpaper_per_monitor({})
+        create.assert_not_called()
+
+    def test_sets_every_monitor_with_one_shared_style(self, platform, caplog):
+        idw = MagicMock()
+        assignments = {
+            "mon-a": (Path("/tmp/a.jpg"), "fill"),
+            "mon-b": (Path("/tmp/b.jpg"), "fill"),
+        }
+        with patch("comtypes.CoInitialize"), patch("comtypes.CoUninitialize"), \
+             patch("comtypes.client.CreateObject", return_value=idw):
+            platform.apply_wallpaper_per_monitor(assignments)
+        assert idw.SetPosition.call_count == 1
+        assert {c.args[0] for c in idw.SetWallpaper.call_args_list} == {"mon-a", "mon-b"}
+
+    def test_warns_and_picks_one_style_when_assignments_differ(self, platform, caplog):
+        idw = MagicMock()
+        assignments = {
+            "mon-a": (Path("/tmp/a.jpg"), "fill"),
+            "mon-b": (Path("/tmp/b.jpg"), "tile"),
+        }
+        with patch("comtypes.CoInitialize"), patch("comtypes.CoUninitialize"), \
+             patch("comtypes.client.CreateObject", return_value=idw), \
+             caplog.at_level(logging.WARNING):
+            platform.apply_wallpaper_per_monitor(assignments)
+        assert idw.SetPosition.call_count == 1  # only one style can actually be applied
+        assert any("per-monitor" in r.message for r in caplog.records)

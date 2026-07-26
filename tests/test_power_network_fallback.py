@@ -30,7 +30,7 @@ class FakePlatform(WallpaperPlatform):
     def list_monitors(self):
         return [MonitorInfo("m0", 0, 0, 1920, 1080)]
 
-    def apply_wallpaper_per_monitor(self, assignments, style):
+    def apply_wallpaper_per_monitor(self, assignments):
         pass
 
     def get_power_state(self):

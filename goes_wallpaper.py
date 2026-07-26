@@ -36,6 +36,7 @@ module for the interface and platform_windows.py for the (currently only) backen
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import importlib.metadata
 import io
@@ -54,6 +55,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
+import aggdraw
 import numpy as np
 import requests
 from PIL import Image, ImageColor, ImageDraw, ImageFont, UnidentifiedImageError
@@ -99,12 +101,14 @@ def build_image_url(satellite: str, sector: str, product: str, resolution: str) 
 
 
 @dataclass(slots=True)
-class Combo:
-    """A named source+crop combo for combo_mode = "rotate"/"per_monitor". Any source
-    field left unset (None) falls back to the top-level Config value; the crop fields
-    always apply (default: no crop). `monitor` (0-based, matching the enumeration
-    order IDesktopWallpaper reports) is required for "per_monitor" and ignored for
-    "rotate"."""
+class Pipeline:
+    """A named, fully-resolved source+crop+projection+style bundle for
+    pipeline_mode = "rotate"/"per_monitor"/"files". Any field left unset (None)
+    falls back to the top-level Config value; the fractional crop fields always
+    apply (default: no crop). `monitor` (0-based, matching the enumeration order
+    IDesktopWallpaper reports) is used by "per_monitor" and ignored otherwise.
+    `output_file` (plus optional `output_width`/`output_height`) is used by
+    "files" and ignored otherwise -- see run_once_files/apply_style_to_canvas."""
     name: str
     satellite: str | None = None
     sector: str | None = None
@@ -125,7 +129,28 @@ class Combo:
     crop_min_lat: float | None = None
     crop_max_lon: float | None = None
     crop_max_lat: float | None = None
+    # Falls back to Config.output_projection/etc when unset -- see resolve_source.
+    output_projection: str | None = None
+    output_projection_center_lon: float | None = None
+    output_projection_center_lat: float | None = None
+    output_projection_lcc_lat1: float | None = None
+    output_projection_lcc_lat2: float | None = None
+    # Falls back to Config.wallpaper_style when unset. Real per-pipeline effect for
+    # "rotate"/"per_monitor" (KDE/macOS) -- Windows' IDesktopWallpaper.SetPosition
+    # has no per-monitor equivalent, so "per_monitor" degrades to one style for all
+    # monitors there (see apply_wallpaper_per_monitor). Baked into the saved file
+    # ourselves for "files" (see apply_style_to_canvas) since there's no OS
+    # wallpaper renderer to delegate to for a plain file.
+    wallpaper_style: str | None = None
     monitor: int | None = None
+    # "files" mode only: render straight to this path every cycle instead of
+    # applying as a wallpaper. output_width/output_height (both-or-neither) give
+    # apply_style_to_canvas a target canvas to bake wallpaper_style onto; leaving
+    # them unset skips that entirely and saves the image at whatever size
+    # resolution/crop_*/output_projection already produced.
+    output_file: str | None = None
+    output_width: int | None = None
+    output_height: int | None = None
 
 
 @dataclass(slots=True)
@@ -145,8 +170,10 @@ class GeoJSONSource:
     [[geojson_sources]]) -- cached in data_dir, keyed on file mtimes + this entry's
     name/style/satellite/resolution (see _geojson_files_cache_key/_id). Draws
     whatever Point/MultiPoint/LineString/MultiLineString/Polygon/MultiPolygon
-    features `files` contain; a feature's `properties.color`/`properties.name`
-    override `color`/the marker label for that one feature. City markers are just
+    features `files` contain; a feature's properties override this entry's
+    defaults for that one feature -- see _resolve_feature_style (color/fill/width/
+    opacity, simplestyle-spec names preferred, `properties.color` still honored
+    for back-compat) and _resolve_feature_icon (icon/label). City markers are just
     another GeoJSONSource pointing at a small hand-written GeoJSON file -- there's no
     separate "city" concept in code."""
     name: str
@@ -156,6 +183,16 @@ class GeoJSONSource:
     marker_radius: int = 5
     opacity: int = 160  # 0-255
     font_size: int = 14  # for Point/MultiPoint features carrying a `name` property
+    # Polygon/MultiPolygon fill -- None (default) means outline-only, today's
+    # behavior. Interior rings (holes) render as real gaps, not solid fill --
+    # see _build_geojson_layer.
+    fill: tuple[int, int, int] | None = None
+    fill_opacity: int = 160  # 0-255, only used when fill resolves to something
+    # Point/MultiPoint marker icon -- either a name from the bundled Maki set
+    # (_BUNDLED_ICONS) or a path to a custom PNG. Replaces the outlined-circle
+    # marker for that feature; None (default) keeps today's circle. See
+    # _resolve_feature_icon/draw_point.
+    icon: str | None = None
 
 
 @dataclass(slots=True)
@@ -173,6 +210,9 @@ class ShellSource:
     line_width: int = 2
     marker_radius: int = 5
     opacity: int = 200  # 0-255
+    fill: tuple[int, int, int] | None = None
+    fill_opacity: int = 160  # 0-255, only used when fill resolves to something
+    icon: str | None = None
     font_size: int = 14  # for Point/MultiPoint features carrying a `name` property
 
 
@@ -181,8 +221,8 @@ class OverlaysConfig:
     """Everything drawn on top of the fetched satellite frame, loaded from a separate
     file (overlays.toml, see DEFAULT_OVERLAYS_CONFIG_PATH/load_overlays_config) --
     kept out of Config/config.toml since this is content, not app behavior, and
-    grows independently of it (more cities, more GeoJSON sources) the way combos or
-    scheduling settings don't. See OVERLAYS.md."""
+    grows independently of it (more cities, more GeoJSON sources) the way pipelines
+    or scheduling settings don't. See OVERLAYS.md."""
     graticule: GraticuleConfig = field(default_factory=GraticuleConfig)
     geojson_sources: tuple[GeoJSONSource, ...] = ()
     shell_sources: tuple[ShellSource, ...] = ()
@@ -199,7 +239,7 @@ class Config:
     # native ABI band-2 resolution). "latest" resolves to 5000x3000 for CONUS, one tier
     # below the true max. Default here is 5000x3000 so a full-frame crop already covers
     # a 4K (3840x2160) monitor without upsampling; bump to "10000x6000" if you crop
-    # aggressively (source_crop_*/combo crop_*) and need more headroom, at the cost of
+    # aggressively (source_crop_*/pipeline crop_*) and need more headroom, at the cost of
     # a much bigger download every cycle. Full Disk's tiers are different (verified:
     # 1808x1808, 5424x5424, 10848x10848); Mesoscale wasn't verified — check with curl
     # against a few candidate WxH values before relying on a specific size there.
@@ -250,17 +290,18 @@ class Config:
     # Also apply the same rendered image as the lock screen (not just the desktop
     # wallpaper) via WallpaperPlatform.apply_lock_screen(). Opt-in, supported on
     # Windows and KDE Plasma so far (see platform_windows.py/platform_linux_kde.py),
-    # and incompatible with combo_mode = "per_monitor" (the lock screen is a single
-    # image; there's no per-monitor equivalent) -- see validate_lock_screen(), which
-    # raises at startup rather than silently no-op-ing every cycle if either
-    # condition isn't met. Always mirrors the desktop wallpaper exactly -- no
-    # separate source/crop/style of its own yet. NEXT_STEPS.md item 13 tracks giving
-    # it independent framing (e.g. a portrait crop) while still reusing this cycle's
-    # already-downloaded source image rather than fetching a second one.
+    # and incompatible with pipeline_mode = "per_monitor"/"files" (the lock screen is
+    # a single image; there's no per-monitor/per-file equivalent) -- see
+    # validate_lock_screen(), which raises at startup rather than silently
+    # no-op-ing every cycle if either condition isn't met. Always mirrors the
+    # desktop wallpaper exactly -- no separate source/crop/style of its own yet.
+    # NEXT_STEPS.md item 13 tracks giving it independent framing (e.g. a portrait
+    # crop) while still reusing this cycle's already-downloaded source image rather
+    # than fetching a second one.
     set_lock_screen: bool = False
     # If set, also save the rendered frame(s) here and skip applying them as the
     # desktop wallpaper -- for testing a render (new source_kind, overlays, crop
-    # settings) without touching the real wallpaper. combo_mode = "per_monitor"
+    # settings) without touching the real wallpaper. pipeline_mode = "per_monitor"
     # writes one file per monitor, with `_monitor{i}` inserted before the extension.
     render_to: Path | None = None
     # Prunes overlay_geojson_cache_*.png/.json pairs (see render_static_geojson_
@@ -272,6 +313,14 @@ class Config:
     # measure, however old its content is, since every reuse touches its mtime.
     # 0 (or negative) disables pruning.
     overlay_cache_max_age_days: float = 30.0
+    # Set false (or pass --no-overlay-cache) to force every geojson_sources entry
+    # to re-parse/re-project/re-draw every cycle, ignoring any existing
+    # overlay_geojson_cache_*.png/.json match -- e.g. while iterating on
+    # overlays.toml styling/icons and wanting to see every change immediately,
+    # without waiting on (or manually reasoning about) the cache key picking it
+    # up. A fresh cache pair is still written afterward either way, so cache
+    # reuse resumes normally the next time this is left at its default (true).
+    overlay_cache: bool = True
 
     # Screen handling
     crop_to_screen: bool = True
@@ -279,7 +328,7 @@ class Config:
     screen_width: int | None = None  # override auto-detection
     screen_height: int | None = None
     # For platform = "render" specifically, these two also size the synthetic
-    # monitor list_monitors() reports (combo_mode = "per_monitor"'s render size) --
+    # monitor list_monitors() reports (pipeline_mode = "per_monitor"'s render size) --
     # see get_platform()'s render_fallback_width/height parameters. Every other
     # backend ignores that plumbing; it only reaches RenderOnlyPlatform.
     span_all_monitors: bool = False  # crop to the full virtual desktop instead of the
@@ -325,8 +374,8 @@ class Config:
     source_crop_max_lat: float | None = None
 
     # Reproject the rendered frame into a different map projection instead of the
-    # satellite's native GEOS view. "native" (default): no reprojection. Not
-    # combo-overridable. See reproject_frame.
+    # satellite's native GEOS view. "native" (default): no reprojection.
+    # Per-pipeline overridable -- see Pipeline.output_projection. See reproject_frame.
     #
     # Bounds-framed (use source_crop_min_lon/min_lat/max_lon/max_lat above, required in
     # these modes -- those bounds become the reprojected output's extent, replacing
@@ -357,17 +406,22 @@ class Config:
     # of Config entirely -- they're content, not app behavior, and grow independently
     # of everything else here. See OverlaysConfig / overlays.toml / OVERLAYS.md.
 
-    # Multiple named source+crop combos (see the Combo dataclass), and how to use
-    # them. combos are ignored entirely in "single" mode (the default — just the
-    # top-level satellite/sector/product/resolution/source_crop_* fields above).
-    #   "single"      - today's behavior; combos ignored.
-    #   "rotate"      - cycle through combos one per cycle (index persisted in
+    # Named pipelines (see the Pipeline dataclass -- source+crop+projection+style,
+    # each independently overridable), and how to use them. pipelines are ignored
+    # entirely in "single" mode (the default — just the top-level
+    # satellite/sector/product/resolution/source_crop_*/output_projection/
+    # wallpaper_style fields above).
+    #   "single"      - today's behavior; pipelines ignored.
+    #   "rotate"      - cycle through pipelines one per cycle (name persisted in
     #                   state.json), applied as a single wallpaper like "single" mode.
-    #   "per_monitor" - each combo's `monitor` index gets its own independently
-    #                   rendered+applied wallpaper via Windows' per-monitor wallpaper
-    #                   API. Every combo must set `monitor` in this mode.
-    combos: tuple[Combo, ...] = ()
-    combo_mode: str = "single"
+    #   "per_monitor" - each pipeline's `monitor` index gets its own independently
+    #                   rendered+applied wallpaper via the platform's per-monitor
+    #                   wallpaper API. Every assigned pipeline must set `monitor`.
+    #   "files"       - every pipeline with `output_file` set is rendered straight
+    #                   to that path every cycle instead of applied as a wallpaper;
+    #                   pipelines without it are ignored in this mode.
+    pipelines: tuple[Pipeline, ...] = ()
+    pipeline_mode: str = "single"
 
     # Info block overlay
     info_block: bool = True
@@ -439,6 +493,11 @@ class Config:
     # Misc
     skip_if_unchanged: bool = True
     log_level: str = "INFO"
+    # Also settable via --log-to-stdout -- useful while debugging (e.g. a
+    # shell_sources command that isn't behaving as expected) without needing to
+    # tail data_dir/log.txt in a separate window. The file handler always stays
+    # on regardless of this.
+    log_to_stdout: bool = False
 
     @property
     def image_url(self) -> str:
@@ -495,15 +554,15 @@ def load_config(config_path: Path, overrides: dict[str, Any], platform: Wallpape
         values["render_to"] = Path(values["render_to"])
     if "retry_statuses" in values:
         values["retry_statuses"] = tuple(values["retry_statuses"])
-    if "combos" in values:
-        combo_fields = {f.name for f in fields(Combo)}
+    if "pipelines" in values:
+        pipeline_fields = {f.name for f in fields(Pipeline)}
         parsed = []
-        for i, combo_dict in enumerate(values["combos"]):
-            unknown_keys = set(combo_dict) - combo_fields
+        for i, pipeline_dict in enumerate(values["pipelines"]):
+            unknown_keys = set(pipeline_dict) - pipeline_fields
             if unknown_keys:
-                raise ValueError(f"Unknown key(s) in combos[{i}]: {', '.join(sorted(unknown_keys))}")
-            parsed.append(Combo(**combo_dict))
-        values["combos"] = tuple(parsed)
+                raise ValueError(f"Unknown key(s) in pipelines[{i}]: {', '.join(sorted(unknown_keys))}")
+            parsed.append(Pipeline(**pipeline_dict))
+        values["pipelines"] = tuple(parsed)
 
     return Config(**values)
 
@@ -579,30 +638,47 @@ def validate_overlays_config(overlays: OverlaysConfig) -> None:
         raise ValueError(f"shell_sources names must be unique: {shell_names}")
 
 
-def validate_combos(cfg: Config) -> None:
-    valid_modes = {"single", "rotate", "per_monitor"}
-    if cfg.combo_mode not in valid_modes:
-        raise ValueError(f"combo_mode must be one of {sorted(valid_modes)}, got {cfg.combo_mode!r}")
-    if cfg.combo_mode == "single":
+def validate_pipelines(cfg: Config) -> None:
+    valid_modes = {"single", "rotate", "per_monitor", "files"}
+    if cfg.pipeline_mode not in valid_modes:
+        raise ValueError(f"pipeline_mode must be one of {sorted(valid_modes)}, got {cfg.pipeline_mode!r}")
+    if cfg.pipeline_mode == "single":
         return
 
-    if not cfg.combos:
-        raise ValueError(f'combo_mode = "{cfg.combo_mode}" requires at least one [[combos]] entry')
+    if not cfg.pipelines:
+        raise ValueError(f'pipeline_mode = "{cfg.pipeline_mode}" requires at least one [[pipelines]] entry')
 
-    names = [c.name for c in cfg.combos]
+    names = [p.name for p in cfg.pipelines]
     if len(names) != len(set(names)):
-        raise ValueError(f"combo names must be unique: {names}")
+        raise ValueError(f"pipeline names must be unique: {names}")
 
-    if cfg.combo_mode == "per_monitor":
-        missing = [c.name for c in cfg.combos if c.monitor is None]
+    if cfg.pipeline_mode == "per_monitor":
+        missing = [p.name for p in cfg.pipelines if p.monitor is None]
         if missing:
             raise ValueError(
-                f'combo_mode = "per_monitor" requires every combo to set `monitor`; '
+                f'pipeline_mode = "per_monitor" requires every pipeline to set `monitor`; '
                 f"missing on: {missing}"
             )
-        monitor_indices = [c.monitor for c in cfg.combos]
+        monitor_indices = [p.monitor for p in cfg.pipelines]
         if len(monitor_indices) != len(set(monitor_indices)):
-            raise ValueError(f"combo `monitor` indices must be unique: {monitor_indices}")
+            raise ValueError(f"pipeline `monitor` indices must be unique: {monitor_indices}")
+
+    if cfg.pipeline_mode == "files":
+        file_pipelines = [p for p in cfg.pipelines if p.output_file]
+        if not file_pipelines:
+            raise ValueError(
+                'pipeline_mode = "files" requires at least one pipeline with `output_file` set'
+            )
+        output_files = [p.output_file for p in file_pipelines]
+        if len(output_files) != len(set(output_files)):
+            raise ValueError(f"pipeline `output_file` values must be unique: {output_files}")
+
+    for pipeline in cfg.pipelines:
+        if (pipeline.output_width is None) != (pipeline.output_height is None):
+            raise ValueError(
+                f"pipelines[{pipeline.name!r}]: output_width/output_height must both be set together, "
+                "or neither"
+            )
 
 
 _VALID_SOURCE_KINDS = {"cdn_jpg", "satpy_raw", "image_file"}
@@ -613,15 +689,15 @@ def validate_source_kind(cfg: Config) -> None:
         raise ValueError(f"source_kind must be one of {sorted(_VALID_SOURCE_KINDS)}, got {cfg.source_kind!r}")
     if cfg.source_kind == "image_file" and not cfg.image_path:
         raise ValueError('source_kind = "image_file" requires image_path to be set')
-    for combo in cfg.combos:
-        kind = combo.source_kind or cfg.source_kind
-        if combo.source_kind is not None and combo.source_kind not in _VALID_SOURCE_KINDS:
+    for pipeline in cfg.pipelines:
+        kind = pipeline.source_kind or cfg.source_kind
+        if pipeline.source_kind is not None and pipeline.source_kind not in _VALID_SOURCE_KINDS:
             raise ValueError(
-                f"combos[{combo.name!r}].source_kind must be one of {sorted(_VALID_SOURCE_KINDS)}, "
-                f"got {combo.source_kind!r}"
+                f"pipelines[{pipeline.name!r}].source_kind must be one of {sorted(_VALID_SOURCE_KINDS)}, "
+                f"got {pipeline.source_kind!r}"
             )
-        if kind == "image_file" and not (combo.image_path or cfg.image_path):
-            raise ValueError(f'combos[{combo.name!r}]: source_kind = "image_file" requires image_path to be set')
+        if kind == "image_file" and not (pipeline.image_path or cfg.image_path):
+            raise ValueError(f'pipelines[{pipeline.name!r}]: source_kind = "image_file" requires image_path to be set')
 
 
 def _check_lonlat_bounds(label: str, min_lon: float | None, min_lat: float | None, max_lon: float | None, max_lat: float | None) -> None:
@@ -641,10 +717,10 @@ def validate_lonlat_crop_bounds(cfg: Config) -> None:
         "source_crop_min_lon/min_lat/max_lon/max_lat",
         cfg.source_crop_min_lon, cfg.source_crop_min_lat, cfg.source_crop_max_lon, cfg.source_crop_max_lat,
     )
-    for combo in cfg.combos:
+    for pipeline in cfg.pipelines:
         _check_lonlat_bounds(
-            f"combos[{combo.name!r}].crop_min_lon/min_lat/max_lon/max_lat",
-            combo.crop_min_lon, combo.crop_min_lat, combo.crop_max_lon, combo.crop_max_lat,
+            f"pipelines[{pipeline.name!r}].crop_min_lon/min_lat/max_lon/max_lat",
+            pipeline.crop_min_lon, pipeline.crop_min_lat, pipeline.crop_max_lon, pipeline.crop_max_lat,
         )
 
 
@@ -652,34 +728,47 @@ _VALID_OUTPUT_PROJECTIONS = {"native", "platecarree", "lambertconformal", "ortho
 _BOUNDS_FRAMED_PROJECTIONS = {"platecarree", "lambertconformal"}
 
 
-def validate_output_projection(cfg: Config) -> None:
-    if cfg.output_projection not in _VALID_OUTPUT_PROJECTIONS:
-        raise ValueError(
-            f"output_projection must be one of {sorted(_VALID_OUTPUT_PROJECTIONS)}, got {cfg.output_projection!r}"
-        )
-    if cfg.output_projection == "lambertconformal":
-        if (cfg.output_projection_lcc_lat1 is None) != (cfg.output_projection_lcc_lat2 is None):
-            raise ValueError("output_projection_lcc_lat1/lcc_lat2 must both be set together, or neither")
-        if cfg.output_projection_lcc_lat1 is not None and cfg.output_projection_lcc_lat1 >= cfg.output_projection_lcc_lat2:
+def _check_output_projection(
+    label: str, projection: str, lcc_lat1: float | None, lcc_lat2: float | None,
+    min_lon: float | None, min_lat: float | None, max_lon: float | None, max_lat: float | None,
+) -> None:
+    if projection not in _VALID_OUTPUT_PROJECTIONS:
+        raise ValueError(f"{label}: output_projection must be one of {sorted(_VALID_OUTPUT_PROJECTIONS)}, got {projection!r}")
+    if projection == "lambertconformal":
+        if (lcc_lat1 is None) != (lcc_lat2 is None):
+            raise ValueError(f"{label}: output_projection_lcc_lat1/lcc_lat2 must both be set together, or neither")
+        if lcc_lat1 is not None and lcc_lat1 >= lcc_lat2:
             raise ValueError(
-                f"output_projection_lcc_lat1 ({cfg.output_projection_lcc_lat1}) must be less than "
-                f"output_projection_lcc_lat2 ({cfg.output_projection_lcc_lat2})"
+                f"{label}: output_projection_lcc_lat1 ({lcc_lat1}) must be less than "
+                f"output_projection_lcc_lat2 ({lcc_lat2})"
             )
-    if cfg.output_projection not in _BOUNDS_FRAMED_PROJECTIONS:
+    if projection not in _BOUNDS_FRAMED_PROJECTIONS:
         return
+    if None in (min_lon, min_lat, max_lon, max_lat):
+        raise ValueError(
+            f'{label}: output_projection = "{projection}" requires a complete lon/lat crop box '
+            "(source_crop_min_lon/min_lat/max_lon/max_lat, or a per-pipeline override)"
+        )
 
-    sources = cfg.combos if cfg.combos else [None]
-    for combo in sources:
-        min_lon = combo.crop_min_lon if combo and combo.crop_min_lon is not None else cfg.source_crop_min_lon
-        min_lat = combo.crop_min_lat if combo and combo.crop_min_lat is not None else cfg.source_crop_min_lat
-        max_lon = combo.crop_max_lon if combo and combo.crop_max_lon is not None else cfg.source_crop_max_lon
-        max_lat = combo.crop_max_lat if combo and combo.crop_max_lat is not None else cfg.source_crop_max_lat
-        label = f"combos[{combo.name!r}]" if combo else "source_crop_min_lon/min_lat/max_lon/max_lat"
-        if None in (min_lon, min_lat, max_lon, max_lat):
-            raise ValueError(
-                f'output_projection = "{cfg.output_projection}" requires a complete lon/lat crop box '
-                f"(source_crop_min_lon/min_lat/max_lon/max_lat, or a per-combo override) for {label}"
-            )
+
+def validate_output_projection(cfg: Config) -> None:
+    sources = cfg.pipelines if cfg.pipelines else [None]
+    for pipeline in sources:
+        projection = pipeline.output_projection if pipeline and pipeline.output_projection is not None else cfg.output_projection
+        lcc_lat1 = (
+            pipeline.output_projection_lcc_lat1 if pipeline and pipeline.output_projection_lcc_lat1 is not None
+            else cfg.output_projection_lcc_lat1
+        )
+        lcc_lat2 = (
+            pipeline.output_projection_lcc_lat2 if pipeline and pipeline.output_projection_lcc_lat2 is not None
+            else cfg.output_projection_lcc_lat2
+        )
+        min_lon = pipeline.crop_min_lon if pipeline and pipeline.crop_min_lon is not None else cfg.source_crop_min_lon
+        min_lat = pipeline.crop_min_lat if pipeline and pipeline.crop_min_lat is not None else cfg.source_crop_min_lat
+        max_lon = pipeline.crop_max_lon if pipeline and pipeline.crop_max_lon is not None else cfg.source_crop_max_lon
+        max_lat = pipeline.crop_max_lat if pipeline and pipeline.crop_max_lat is not None else cfg.source_crop_max_lat
+        label = f"pipelines[{pipeline.name!r}]" if pipeline else "output_projection"
+        _check_output_projection(label, projection, lcc_lat1, lcc_lat2, min_lon, min_lat, max_lon, max_lat)
 
 
 _VALID_PLATFORMS = {"auto", "windows", "kde", "macos", "render"}
@@ -700,19 +789,19 @@ def validate_lock_screen(cfg: Config, platform: WallpaperPlatform) -> None:
             "-- for KDE, this also means no kwriteconfig6/kwriteconfig5 binary was "
             "found)."
         )
-    if cfg.combo_mode == "per_monitor":
+    if cfg.pipeline_mode in ("per_monitor", "files"):
         raise ValueError(
-            'set_lock_screen = true is not supported with combo_mode = "per_monitor" '
-            "(the lock screen is a single image, not per-monitor) -- use "
+            f'set_lock_screen = true is not supported with pipeline_mode = "{cfg.pipeline_mode}" '
+            "(the lock screen is a single image, not per-monitor/per-file) -- use "
             '"single" or "rotate" instead.'
         )
 
 
 @dataclass(slots=True)
 class EffectiveSource:
-    """The fully-resolved satellite/sector/product/resolution/crop for one cycle —
-    either the top-level Config (combo=None) or a Combo with its unset fields filled
-    in from Config."""
+    """The fully-resolved satellite/sector/product/resolution/crop/projection/style
+    for one cycle — either the top-level Config (pipeline=None) or a Pipeline with
+    its unset fields filled in from Config."""
     name: str
     satellite: str
     sector: str
@@ -728,6 +817,15 @@ class EffectiveSource:
     crop_min_lat: float | None
     crop_max_lon: float | None
     crop_max_lat: float | None
+    output_projection: str
+    output_projection_center_lon: float | None
+    output_projection_center_lat: float | None
+    output_projection_lcc_lat1: float | None
+    output_projection_lcc_lat2: float | None
+    wallpaper_style: str
+    output_file: str | None
+    output_width: int | None
+    output_height: int | None
 
     @property
     def image_url(self) -> str:
@@ -754,8 +852,8 @@ class EffectiveSource:
         return SECTOR_LABELS.get(self.sector, self.sector)
 
 
-def resolve_source(cfg: Config, combo: Combo | None) -> EffectiveSource:
-    if combo is None:
+def resolve_source(cfg: Config, pipeline: Pipeline | None) -> EffectiveSource:
+    if pipeline is None:
         return EffectiveSource(
             name="default",
             satellite=cfg.satellite,
@@ -772,23 +870,53 @@ def resolve_source(cfg: Config, combo: Combo | None) -> EffectiveSource:
             crop_min_lat=cfg.source_crop_min_lat,
             crop_max_lon=cfg.source_crop_max_lon,
             crop_max_lat=cfg.source_crop_max_lat,
+            output_projection=cfg.output_projection,
+            output_projection_center_lon=cfg.output_projection_center_lon,
+            output_projection_center_lat=cfg.output_projection_center_lat,
+            output_projection_lcc_lat1=cfg.output_projection_lcc_lat1,
+            output_projection_lcc_lat2=cfg.output_projection_lcc_lat2,
+            wallpaper_style=cfg.wallpaper_style,
+            output_file=None,
+            output_width=None,
+            output_height=None,
         )
     return EffectiveSource(
-        name=combo.name,
-        satellite=combo.satellite or cfg.satellite,
-        sector=combo.sector or cfg.sector,
-        product=combo.product or cfg.product,
-        resolution=combo.resolution or cfg.resolution,
-        source_kind=combo.source_kind or cfg.source_kind,
-        image_path=combo.image_path or cfg.image_path,
-        crop_left=combo.crop_left,
-        crop_top=combo.crop_top,
-        crop_right=combo.crop_right,
-        crop_bottom=combo.crop_bottom,
-        crop_min_lon=combo.crop_min_lon if combo.crop_min_lon is not None else cfg.source_crop_min_lon,
-        crop_min_lat=combo.crop_min_lat if combo.crop_min_lat is not None else cfg.source_crop_min_lat,
-        crop_max_lon=combo.crop_max_lon if combo.crop_max_lon is not None else cfg.source_crop_max_lon,
-        crop_max_lat=combo.crop_max_lat if combo.crop_max_lat is not None else cfg.source_crop_max_lat,
+        name=pipeline.name,
+        satellite=pipeline.satellite or cfg.satellite,
+        sector=pipeline.sector or cfg.sector,
+        product=pipeline.product or cfg.product,
+        resolution=pipeline.resolution or cfg.resolution,
+        source_kind=pipeline.source_kind or cfg.source_kind,
+        image_path=pipeline.image_path or cfg.image_path,
+        crop_left=pipeline.crop_left,
+        crop_top=pipeline.crop_top,
+        crop_right=pipeline.crop_right,
+        crop_bottom=pipeline.crop_bottom,
+        crop_min_lon=pipeline.crop_min_lon if pipeline.crop_min_lon is not None else cfg.source_crop_min_lon,
+        crop_min_lat=pipeline.crop_min_lat if pipeline.crop_min_lat is not None else cfg.source_crop_min_lat,
+        crop_max_lon=pipeline.crop_max_lon if pipeline.crop_max_lon is not None else cfg.source_crop_max_lon,
+        crop_max_lat=pipeline.crop_max_lat if pipeline.crop_max_lat is not None else cfg.source_crop_max_lat,
+        output_projection=pipeline.output_projection or cfg.output_projection,
+        output_projection_center_lon=(
+            pipeline.output_projection_center_lon if pipeline.output_projection_center_lon is not None
+            else cfg.output_projection_center_lon
+        ),
+        output_projection_center_lat=(
+            pipeline.output_projection_center_lat if pipeline.output_projection_center_lat is not None
+            else cfg.output_projection_center_lat
+        ),
+        output_projection_lcc_lat1=(
+            pipeline.output_projection_lcc_lat1 if pipeline.output_projection_lcc_lat1 is not None
+            else cfg.output_projection_lcc_lat1
+        ),
+        output_projection_lcc_lat2=(
+            pipeline.output_projection_lcc_lat2 if pipeline.output_projection_lcc_lat2 is not None
+            else cfg.output_projection_lcc_lat2
+        ),
+        wallpaper_style=pipeline.wallpaper_style or cfg.wallpaper_style,
+        output_file=pipeline.output_file,
+        output_width=pipeline.output_width,
+        output_height=pipeline.output_height,
     )
 
 
@@ -839,19 +967,24 @@ def _commit_hash() -> str | None:
 
 def setup_logging(cfg: Config) -> None:
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
-    handler = RotatingFileHandler(
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    file_handler = RotatingFileHandler(
         cfg.log_path,
         mode="a",
         maxBytes=1024 * 1024,
         backupCount=2,
         encoding="utf-8",
     )
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    file_handler.setFormatter(formatter)
 
     root = logging.getLogger()
     root.setLevel(cfg.log_level)
     root.handlers.clear()
-    root.addHandler(handler)
+    root.addHandler(file_handler)
+    if cfg.log_to_stdout:
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        stdout_handler.setFormatter(formatter)
+        root.addHandler(stdout_handler)
 
     commit = _commit_hash()
     logging.info(
@@ -1423,9 +1556,8 @@ def draw_graticule(
     `satellite`."""
     w, h = img.size
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    fill = (*color, opacity)
-    line_width = max(1, round(w / _OVERLAY_REFERENCE_WIDTH_PX))  # a 1px line is invisible at 5000x3000+
+    draw = aggdraw.Draw(overlay)
+    pen = aggdraw.Pen(color, max(1, round(w / _OVERLAY_REFERENCE_WIDTH_PX)), opacity)  # a 1px line is invisible at 5000x3000+
 
     def project(lons: np.ndarray, lats: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
         if area is not None:
@@ -1433,16 +1565,16 @@ def draw_graticule(
         return lonlat_to_pixels(satellite, lons, lats, w, h, sector)
 
     def draw_run(cols: np.ndarray, rows: np.ndarray) -> None:
-        run: list[tuple[float, float]] = []
+        run: list[float] = []
         for c, r in zip(cols, rows):
             if 0 <= c <= w and 0 <= r <= h and np.isfinite(c) and np.isfinite(r):
-                run.append((float(c), float(r)))
+                run.extend((float(c), float(r)))
             else:
-                if len(run) > 1:
-                    draw.line(run, fill=fill, width=line_width)
+                if len(run) > 2:
+                    draw.line(run, pen)
                 run = []
-        if len(run) > 1:
-            draw.line(run, fill=fill, width=line_width)
+        if len(run) > 2:
+            draw.line(run, pen)
 
     lon_samples = np.arange(-180, 180.01, 0.5)
     lat_samples = np.arange(-85, 85.01, 0.5)
@@ -1454,6 +1586,7 @@ def draw_graticule(
         result = project(np.full_like(lat_samples, lon), lat_samples)
         if result:
             draw_run(*result)
+    draw.flush()
 
     base = img.convert("RGBA")
     base.alpha_composite(overlay)
@@ -1550,31 +1683,187 @@ def _iter_geojson_features(geojson: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+_BUNDLED_ICONS_DIR = Path(__file__).with_name("overlays") / "icons"
+
+
+@functools.lru_cache(maxsize=1)
+def _bundled_icons() -> dict[str, Path]:
+    """Maps each bundled Maki-derived icon's name (its PNG's filename stem, e.g.
+    "marker"/"fire-station") to its shipped path (overlays/icons/*.png --
+    rasterized from vendor/maki/, see vendor/maki/README.md for provenance/
+    license). Cached since this scans a static, shipped directory that doesn't
+    change at runtime."""
+    return {p.stem: p for p in _BUNDLED_ICONS_DIR.glob("*.png")}
+
+
 def _resolve_feature_color(prop_color: Any, default: tuple[int, int, int]) -> tuple[int, int, int]:
-    """Resolve a feature's `properties.color` to an (r, g, b) tuple. Accepts an
-    [r, g, b] list/tuple (the documented format) or a string -- either a hex code
-    (`"#ff0000"`) or one of PIL's ~140 named colors (`"red"`), since that's what
-    real-world GeoJSON tools (geojson.io, GitHub's simplestyle-spec) actually emit.
-    Falls back to `default` (logged) for anything that doesn't parse, rather than
-    raising and losing the whole overlay over one bad feature."""
+    """Resolve a color value (e.g. `properties.stroke`/`properties.color`/
+    `properties.fill`) to an (r, g, b) tuple. Accepts an [r, g, b] list/tuple (the
+    documented format) or a string -- either a hex code (`"#ff0000"`) or one of
+    PIL's ~140 named colors, since that's what real-world GeoJSON tools
+    (geojson.io, GitHub's simplestyle-spec) actually emit. Falls back to
+    `default` (logged) for anything that doesn't parse, rather than raising and
+    losing the whole overlay over one bad feature."""
     if not prop_color:
         return default
     if isinstance(prop_color, str):
         try:
             return ImageColor.getrgb(prop_color)[:3]
         except ValueError:
-            logging.warning("Unrecognized properties.color %r; using default color", prop_color)
+            logging.warning("Unrecognized color %r; using default color", prop_color)
             return default
     try:
         return (int(prop_color[0]), int(prop_color[1]), int(prop_color[2]))
     except (TypeError, IndexError, ValueError):
-        logging.warning("Unrecognized properties.color %r; using default color", prop_color)
+        logging.warning("Unrecognized color %r; using default color", prop_color)
         return default
 
 
+def _resolve_fill_color(prop_fill: Any, entry_default: tuple[int, int, int] | None) -> tuple[int, int, int] | None:
+    """Resolve a feature's fill color: `properties.fill` (parsed the same way
+    stroke/marker colors are) if present, else the entry's own `fill` config --
+    which may itself be None, meaning outline-only unless a feature opts in with
+    its own `properties.fill`."""
+    if prop_fill in (None, ""):
+        return entry_default
+    return _resolve_feature_color(prop_fill, entry_default if entry_default is not None else (255, 255, 255))
+
+
+def _first_present(props: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    """First of `keys` with a non-empty value in `props`, or None -- used to prefer
+    simplestyle-spec property names (e.g. `stroke`) over this project's older ad
+    hoc ones (e.g. `color`) without breaking existing GeoJSON that only sets the
+    old name."""
+    for key in keys:
+        value = props.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _resolve_opacity(prop_value: Any, default: int) -> int:
+    """Simplestyle `*-opacity` properties are 0.0-1.0 floats, unlike this
+    project's own 0-255 `opacity`/`fill_opacity` config fields -- convert and
+    range-check, falling back to `default` (logged) for anything that doesn't
+    parse as a number in [0.0, 1.0]."""
+    if prop_value is None:
+        return default
+    try:
+        value = float(prop_value)
+    except (TypeError, ValueError):
+        logging.warning("Unrecognized opacity value %r; using default", prop_value)
+        return default
+    if not (0.0 <= value <= 1.0):
+        logging.warning("Opacity value %r out of range 0.0-1.0; using default", prop_value)
+        return default
+    return round(value * 255)
+
+
+_MARKER_SIZE_MULTIPLIERS = {"small": 0.6, "medium": 1.0, "large": 1.6}
+
+
+def _resolve_marker_size_multiplier(prop_value: Any) -> float:
+    """simplestyle's `marker-size` is an enum, not a pixel value -- maps to a
+    multiplier on the entry's marker_radius. Unrecognized value: 1.0x (logged),
+    same posture as other unparseable per-feature style values."""
+    if prop_value is None:
+        return 1.0
+    multiplier = _MARKER_SIZE_MULTIPLIERS.get(prop_value)
+    if multiplier is None:
+        logging.warning("Unrecognized properties.marker-size %r; using 1.0x", prop_value)
+        return 1.0
+    return multiplier
+
+
+def _resolve_stroke_width(prop_value: Any, default: float) -> float:
+    """`properties.stroke-width` overrides the entry's line_width -- both are base
+    (pre-resolution-scale) values, scaled the same way afterward."""
+    if prop_value is None:
+        return default
+    try:
+        value = float(prop_value)
+    except (TypeError, ValueError):
+        logging.warning("Unrecognized properties.stroke-width %r; using default", prop_value)
+        return default
+    if value <= 0:
+        logging.warning("properties.stroke-width %r must be positive; using default", prop_value)
+        return default
+    return value
+
+
+def _resolve_icon_path(icon_value: str | None) -> tuple[Path, bool] | None:
+    """Resolve an `icon` config value (or a `properties.icon` override) to a real
+    file path -- a name from the bundled Maki-derived set (_bundled_icons())
+    takes precedence, otherwise the value is treated as a literal file path (same
+    untouched resolution GeoJSONSource.files paths already get). Returns
+    (path, is_bundled) so callers can decide whether to tint it (see
+    _resolve_feature_icon/draw_point) -- only the bundled set is a recolorable
+    silhouette; a custom PNG's own colors are left alone. None (logged) if
+    `icon_value` is set but matches neither a bundled name nor an existing
+    file."""
+    if not icon_value:
+        return None
+    bundled_path = _bundled_icons().get(icon_value)
+    if bundled_path is not None:
+        return bundled_path, True
+    path = Path(icon_value)
+    if path.is_file():
+        return path, False
+    logging.warning("Unrecognized icon %r (not a bundled name or an existing file); using default marker", icon_value)
+    return None
+
+
+def _resolve_feature_icon(props: dict[str, Any], entry_icon: tuple[Path, bool] | None) -> tuple[Path, bool] | None:
+    """Per-feature icon resolution, most-specific first: `properties.icon` (this
+    project's extension -- a bundled name or a custom path) -> `properties.
+    marker-symbol` (simplestyle-native -- bundled name *only*, matching the
+    spec's intent of referencing a known icon set, not an arbitrary path) ->
+    the entry's own `icon` field -> None (falls back to the outlined-circle
+    marker)."""
+    feature_icon = props.get("icon")
+    if feature_icon:
+        resolved = _resolve_icon_path(str(feature_icon))
+        if resolved is not None:
+            return resolved
+    marker_symbol = props.get("marker-symbol")
+    if marker_symbol:
+        bundled_path = _bundled_icons().get(str(marker_symbol))
+        if bundled_path is not None:
+            return bundled_path, True
+        logging.warning("Unrecognized properties.marker-symbol %r (not a bundled icon name); ignoring", marker_symbol)
+    return entry_icon
+
+
+def _load_icon(
+    icon_path: Path, size: int, tint: tuple[int, int, int] | None,
+    cache: dict[tuple[Path, int, tuple[int, int, int] | None], Image.Image | None],
+) -> Image.Image | None:
+    """Load+resize (+tint, for bundled Maki icons -- recolorable black
+    silhouettes, unlike an arbitrary custom PNG which keeps its own colors)
+    an icon image, memoized in `cache` so a source with many points sharing one
+    icon doesn't re-read/re-resize/re-tint the file per point. Returns None
+    (logged) if the file can't be opened as an image."""
+    key = (icon_path, size, tint)
+    if key in cache:
+        return cache[key]
+    try:
+        icon_img = Image.open(icon_path).convert("RGBA")
+    except (OSError, UnidentifiedImageError) as e:
+        logging.warning("Couldn't load icon %s: %s; using default marker", icon_path, e)
+        cache[key] = None
+        return None
+    icon_img.thumbnail((size, size), Image.LANCZOS)
+    if tint is not None:
+        solid = Image.new("RGBA", icon_img.size, (*tint, 255))
+        solid.putalpha(icon_img.getchannel("A"))
+        icon_img = solid
+    cache[key] = icon_img
+    return icon_img
+
+
 def _draw_lonlat_run(
-    draw: ImageDraw.ImageDraw, satellite: str, coords: list[list[float]], w: int, h: int,
-    fill: tuple[int, ...], width: int, close: bool = False, sector: str = "CONUS",
+    draw: aggdraw.Draw, satellite: str, coords: list[list[float]], w: int, h: int,
+    pen: aggdraw.Pen, close: bool = False, sector: str = "CONUS",
 ) -> None:
     """Project a line/ring of [lon, lat] pairs and draw it, breaking the line
     wherever a point falls outside the frame (same run-breaking approach as
@@ -1589,52 +1878,120 @@ def _draw_lonlat_run(
     if result is None:
         return
     cols, rows = result
-    run: list[tuple[float, float]] = []
+    run: list[float] = []
     for c, r in zip(cols, rows):
         if 0 <= c <= w and 0 <= r <= h and np.isfinite(c) and np.isfinite(r):
-            run.append((float(c), float(r)))
+            run.extend((float(c), float(r)))
         else:
-            if len(run) > 1:
-                draw.line(run, fill=fill, width=width)
+            if len(run) > 2:
+                draw.line(run, pen)
             run = []
-    if len(run) > 1:
-        draw.line(run, fill=fill, width=width)
+    if len(run) > 2:
+        draw.line(run, pen)
+
+
+def _project_ring(satellite: str, ring: list[list[float]], w: int, h: int, sector: str) -> list[float] | None:
+    """Project a closed ring of [lon, lat] pairs to a flat (x0, y0, x1, y1, ...)
+    pixel-coordinate list for building an aggdraw.Path, or None if the ring is
+    too short or any point doesn't project (off the visible disk/no calibration).
+    Unlike the stroke-only path (_draw_lonlat_run), a filled ring has no natural
+    way to "break" at a projection gap, so fill requires every vertex to project
+    cleanly -- see _draw_polygon."""
+    if len(ring) < 3:
+        return None
+    coords = ring if ring[0] == ring[-1] else [*ring, ring[0]]
+    lons = np.array([c[0] for c in coords])
+    lats = np.array([c[1] for c in coords])
+    result = lonlat_to_pixels(satellite, lons, lats, w, h, sector)
+    if result is None:
+        return None
+    cols, rows = result
+    if not (np.all(np.isfinite(cols)) and np.all(np.isfinite(rows))):
+        return None
+    flat: list[float] = []
+    for c, r in zip(cols, rows):
+        flat.extend((float(c), float(r)))
+    return flat
+
+
+def _draw_polygon(
+    draw: aggdraw.Draw, satellite: str, rings: list[list[list[float]]], w: int, h: int,
+    pen: aggdraw.Pen, brush: aggdraw.Brush | None, sector: str,
+) -> None:
+    """Draw one Polygon's rings (exterior + holes) as a single aggdraw.Path so a
+    brush fill (when set) respects interior rings as real holes, not a solid fill
+    -- relies on GeoJSON's conventional ring winding (RFC 7946: exterior
+    counter-clockwise, holes clockwise) so opposite-wound contours punch holes
+    via aggdraw/AGG's fill rule (confirmed empirically, not just per the spec).
+    Falls back to the existing run-broken outline-only drawing (no fill) if any
+    ring has a point that doesn't project -- see _project_ring."""
+    if brush is not None:
+        projected = [_project_ring(satellite, ring, w, h, sector) for ring in rings]
+        if all(p is not None for p in projected):
+            path = aggdraw.Path()
+            for flat in projected:
+                path.moveto(flat[0], flat[1])
+                for i in range(2, len(flat), 2):
+                    path.lineto(flat[i], flat[i + 1])
+                path.close()
+            draw.path(path, pen, brush)
+            return
+    for ring in rings:
+        _draw_lonlat_run(draw, satellite, ring, w, h, pen, close=True, sector=sector)
 
 
 def _build_geojson_layer(
     satellite: str, features: list[dict[str, Any]], w: int, h: int,
     color: tuple[int, int, int], line_width: int, marker_radius: int, opacity: int,
     font_path: str = "", font_size: int = 14, sector: str = "CONUS",
+    fill: tuple[int, int, int] | None = None, fill_opacity: int = 160, icon: str | None = None,
 ) -> Image.Image:
     """Project + draw Point/MultiPoint/LineString/MultiLineString/Polygon/
-    MultiPolygon features onto a fresh (w, h) transparent RGBA layer. Per-feature
-    `properties.color` (see _resolve_feature_color -- an [r, g, b] list, a hex string,
-    or a named color) overrides the given default color; a Point/MultiPoint feature's
-    `properties.name`, if present, is drawn as a text label next to its marker.
-    Returns just the layer (not composited onto anything) so callers can cache it."""
+    MultiPolygon features onto a fresh (w, h) transparent RGBA layer, via aggdraw
+    (anti-aliased strokes/fills) for geometry and PIL's ImageDraw (aggdraw has no
+    font support) for text labels. Per-feature properties override this entry's
+    defaults for that one feature -- simplestyle-spec names are preferred
+    (`stroke`/`stroke-width`/`stroke-opacity`/`fill`/`fill-opacity`/`marker-color`/
+    `marker-size`/`marker-symbol`), with the older ad hoc `properties.color` still
+    honored as a fallback for stroke/marker color (see _first_present). A
+    Point/MultiPoint feature's `properties.icon` (a bundled Maki-derived name or a
+    custom PNG path) or `properties.marker-symbol` (bundled name only) replaces
+    the outlined-circle marker with a pasted icon; `properties.name`, if present,
+    still draws as a text label next to it either way. Polygon/MultiPolygon rings
+    fill correctly (interior rings as real holes) when `fill` resolves to
+    something -- see _draw_polygon. Returns just the layer (not composited onto
+    anything) so callers can cache it."""
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
+    draw = aggdraw.Draw(overlay)
     scale = max(1.0, w / _OVERLAY_REFERENCE_WIDTH_PX)
     width = max(1, round(line_width * scale))
     radius = marker_radius * scale
+    entry_icon = _resolve_icon_path(icon)
     font: ImageFont.FreeTypeFont | ImageFont.ImageFont | None = None  # loaded lazily, only if a label is actually drawn
+    icon_cache: dict[tuple[Path, int, tuple[int, int, int] | None], Image.Image | None] = {}
+    # Icon pasting (Image.alpha_composite) and label text (PIL.ImageDraw) both
+    # need to happen on the finished pixel buffer after aggdraw's own draw.flush()
+    # commits its rendering, not interleaved with it -- so points collect their
+    # finishing work here instead of drawing it immediately.
+    point_jobs: list[tuple[float, float, Path | None, tuple[int, int, int] | None, float, str | None, tuple[int, ...]]] = []
 
-    def draw_point(lon: float, lat: float, fill: tuple[int, ...], label: str | None) -> None:
-        nonlocal font
+    def draw_point(
+        lon: float, lat: float, pen: aggdraw.Pen, pen_color: tuple[int, int, int], feature_radius: float,
+        icon_resolved: tuple[Path, bool] | None, label: str | None, label_color: tuple[int, ...],
+    ) -> None:
         result = lonlat_to_pixels(satellite, np.array([lon]), np.array([lat]), w, h, sector)
         if result is None:
             return
         c, r = result[0][0], result[1][0]
         if not (0 <= c <= w and 0 <= r <= h and np.isfinite(c) and np.isfinite(r)):
             return
-        draw.ellipse((c - radius, r - radius, c + radius, r + radius), outline=fill, width=width)
-        if label:
-            if font is None:
-                try:
-                    font = ImageFont.truetype(font_path, round(font_size * scale))
-                except OSError:
-                    font = ImageFont.load_default()
-            draw.text((c + radius + 4, r), label, font=font, fill=fill)
+        icon_path, tint = (None, None)
+        if icon_resolved is not None:
+            icon_path, is_bundled = icon_resolved
+            tint = pen_color if is_bundled else None
+        if icon_path is None:
+            draw.ellipse((c - feature_radius, r - feature_radius, c + feature_radius, r + feature_radius), pen)
+        point_jobs.append((c, r, icon_path, tint, feature_radius, label, label_color))
 
     for feature in features:
         geometry = feature.get("geometry") or {}
@@ -1643,45 +2000,95 @@ def _build_geojson_layer(
         if gtype is None or coords is None:
             continue
         props = feature.get("properties") or {}
-        fill = (*_resolve_feature_color(props.get("color"), color), opacity)
-        label = props.get("name")
 
-        if gtype == "Point":
-            draw_point(coords[0], coords[1], fill, label)
-        elif gtype == "MultiPoint":
-            for lon, lat in coords:
-                draw_point(lon, lat, fill, label)
-        elif gtype == "LineString":
-            _draw_lonlat_run(draw, satellite, coords, w, h, fill, width, sector=sector)
+        stroke_color = _resolve_feature_color(_first_present(props, ("stroke", "color")), color)
+        stroke_width = max(1, round(_resolve_stroke_width(props.get("stroke-width"), line_width) * scale))
+        stroke_opacity = _resolve_opacity(props.get("stroke-opacity"), opacity)
+        pen = aggdraw.Pen(stroke_color, stroke_width, stroke_opacity)
+
+        if gtype in ("Point", "MultiPoint"):
+            pen_color = _resolve_feature_color(_first_present(props, ("marker-color", "stroke", "color")), color)
+            marker_pen = aggdraw.Pen(pen_color, stroke_width, stroke_opacity)
+            feature_radius = radius * _resolve_marker_size_multiplier(props.get("marker-size"))
+            icon_resolved = _resolve_feature_icon(props, entry_icon)
+            label = props.get("name")
+            label_color = (*pen_color, stroke_opacity)
+            if gtype == "Point":
+                draw_point(coords[0], coords[1], marker_pen, pen_color, feature_radius, icon_resolved, label, label_color)
+            else:
+                for lon, lat in coords:
+                    draw_point(lon, lat, marker_pen, pen_color, feature_radius, icon_resolved, label, label_color)
+            continue
+
+        if gtype == "LineString":
+            _draw_lonlat_run(draw, satellite, coords, w, h, pen, sector=sector)
         elif gtype == "MultiLineString":
             for line in coords:
-                _draw_lonlat_run(draw, satellite, line, w, h, fill, width, sector=sector)
-        elif gtype == "Polygon":
-            for ring in coords:
-                _draw_lonlat_run(draw, satellite, ring, w, h, fill, width, close=True, sector=sector)
-        elif gtype == "MultiPolygon":
-            for polygon in coords:
-                for ring in polygon:
-                    _draw_lonlat_run(draw, satellite, ring, w, h, fill, width, close=True, sector=sector)
+                _draw_lonlat_run(draw, satellite, line, w, h, pen, sector=sector)
+        elif gtype in ("Polygon", "MultiPolygon"):
+            fill_color = _resolve_fill_color(props.get("fill"), fill)
+            resolved_fill_opacity = _resolve_opacity(props.get("fill-opacity"), fill_opacity)
+            brush = aggdraw.Brush(fill_color, resolved_fill_opacity) if fill_color is not None else None
+            if gtype == "Polygon":
+                _draw_polygon(draw, satellite, coords, w, h, pen, brush, sector)
+            else:
+                for polygon in coords:
+                    _draw_polygon(draw, satellite, polygon, w, h, pen, brush, sector)
+
+    draw.flush()
+
+    if point_jobs:
+        pil_draw = ImageDraw.Draw(overlay)
+        for c, r, icon_path, tint, feature_radius, label, label_color in point_jobs:
+            if icon_path is not None:
+                icon_img = _load_icon(icon_path, round(feature_radius * 2), tint, icon_cache)
+                if icon_img is not None:
+                    overlay.alpha_composite(icon_img, (round(c - icon_img.width / 2), round(r - icon_img.height / 2)))
+            if label:
+                if font is None:
+                    try:
+                        font = ImageFont.truetype(font_path, round(font_size * scale))
+                    except OSError:
+                        font = ImageFont.load_default()
+                pil_draw.text((c + feature_radius + 4, r), label, font=font, fill=label_color)
 
     return overlay
+
+
+def _icon_cache_stat(icon: str | None) -> list[Any]:
+    """[resolved_path, mtime] for an `icon` config value -- resolves a bundled
+    name to its real shipped path first (same as _resolve_icon_path), so the
+    cache key reflects the actual file that'll be read (and its mtime) whether
+    `icon` came from the bundled set or a custom path -- either is a file on
+    disk that can change out from under a stable-looking config value."""
+    resolved = _resolve_icon_path(icon)
+    if resolved is None:
+        return [None, None]
+    path, _is_bundled = resolved
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = None
+    return [str(path), mtime]
 
 
 def draw_geojson_overlay(
     img: Image.Image, satellite: str, geojson: dict[str, Any],
     color: tuple[int, int, int], line_width: int, marker_radius: int, opacity: int,
     font_path: str = "", font_size: int = 14, sector: str = "CONUS",
+    fill: tuple[int, int, int] | None = None, fill_opacity: int = 160, icon: str | None = None,
 ) -> Image.Image:
     """Draw whatever Point/MultiPoint/LineString/MultiLineString/Polygon/MultiPolygon
-    features a GeoJSON payload contains, projected via lonlat_to_pixels. Per-feature
-    `properties.color` ([r, g, b], a hex string, or a named color -- see
-    _resolve_feature_color) overrides the plugin-level default color, and a
-    Point/MultiPoint feature's `properties.name` is drawn as a text label."""
+    features a GeoJSON payload contains, projected via lonlat_to_pixels -- see
+    _build_geojson_layer for the full per-feature styling/fill/icon rules."""
     features = _iter_geojson_features(geojson)
     if not features:
         return img
     w, h = img.size
-    layer = _build_geojson_layer(satellite, features, w, h, color, line_width, marker_radius, opacity, font_path, font_size, sector)
+    layer = _build_geojson_layer(
+        satellite, features, w, h, color, line_width, marker_radius, opacity, font_path, font_size, sector,
+        fill, fill_opacity, icon,
+    )
     base = img.convert("RGBA")
     base.alpha_composite(layer)
     return base.convert("RGB")
@@ -1691,6 +2098,7 @@ def _geojson_files_cache_key(
     name: str, paths: tuple[str, ...], satellite: str, w: int, h: int,
     color: tuple[int, int, int], line_width: int, marker_radius: int, opacity: int,
     font_path: str, font_size: int, sector: str,
+    fill: tuple[int, int, int] | None, fill_opacity: int, icon: str | None,
 ) -> dict[str, Any]:
     """Identifies exactly the inputs that affect the rendered layer -- if any of
     these change, the cached PNG is stale and must be rebuilt. mtime (not content
@@ -1706,6 +2114,8 @@ def _geojson_files_cache_key(
         "name": name, "files": file_stats, "satellite": satellite, "sector": sector, "w": w, "h": h,
         "color": list(color), "line_width": line_width, "marker_radius": marker_radius, "opacity": opacity,
         "font_path": font_path, "font_size": font_size,
+        "fill": list(fill) if fill is not None else None, "fill_opacity": fill_opacity,
+        "icon": _icon_cache_stat(icon),
     }
 
 
@@ -1713,21 +2123,25 @@ def _geojson_files_cache_id(
     name: str, paths: tuple[str, ...], satellite: str, w: int, h: int,
     color: tuple[int, int, int], line_width: int, marker_radius: int, opacity: int,
     font_path: str, font_size: int, sector: str,
+    fill: tuple[int, int, int] | None, fill_opacity: int, icon: str | None,
 ) -> str:
     """A short, stable identifier for one distinct (name, files, satellite, sector,
     frame size, style) combination, used to give each such combination its own cache
     file. `name` (the geojson_sources entry's name) keeps distinct named sources from
     colliding even if they happen to share every other field; without it, two
-    same-styled sources -- or the same source across combos/satellites/resolutions --
-    would fight over one fixed filename (see NEXT_STEPS.md item 16 for the related
-    per-combo-overlay gap this compounds). Deliberately excludes each file's mtime --
+    same-styled sources -- or the same source across pipelines/satellites/resolutions
+    -- would fight over one fixed filename (see NEXT_STEPS.md item 16 for the related
+    per-pipeline-overlay gap this compounds). Deliberately excludes each file's mtime --
     that still lives in the cache metadata and is checked separately, so editing a
     file invalidates the existing entry for this identity rather than minting a new
-    cache file."""
+    cache file. `icon` is keyed by its *resolved* path (not the raw config string),
+    same reasoning -- see _icon_cache_stat."""
     identity = {
         "name": name, "paths": list(paths), "satellite": satellite, "sector": sector, "w": w, "h": h,
         "color": list(color), "line_width": line_width, "marker_radius": marker_radius,
         "opacity": opacity, "font_path": font_path, "font_size": font_size,
+        "fill": list(fill) if fill is not None else None, "fill_opacity": fill_opacity,
+        "icon": _icon_cache_stat(icon)[0],
     }
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -1741,8 +2155,12 @@ def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: Effecti
     unchanged config only pays that cost once, but editing a file or bumping
     resolution rebuilds it automatically. The cache *filename* is itself keyed on
     name/satellite/frame-size/style (_geojson_files_cache_id) so distinct sources
-    (and distinct combos/satellites/resolutions) each get their own cache entry
-    instead of overwriting a shared one -- see its docstring."""
+    (and distinct pipelines/satellites/resolutions) each get their own cache entry
+    instead of overwriting a shared one -- see its docstring. cfg.overlay_cache =
+    false (or --no-overlay-cache) skips checking for an existing match entirely,
+    forcing a fresh render every cycle -- a fresh cache pair is still written
+    afterward, so cache reuse resumes normally once this is back at its default
+    (true)."""
     if not geojson_source.files:
         return img
     w, h = img.size
@@ -1751,18 +2169,20 @@ def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: Effecti
         geojson_source.color, geojson_source.line_width,
         geojson_source.marker_radius, geojson_source.opacity,
         cfg.info_font_path, geojson_source.font_size, source.sector,
+        geojson_source.fill, geojson_source.fill_opacity, geojson_source.icon,
     )
     cache_id = _geojson_files_cache_id(
         geojson_source.name, geojson_source.files, source.satellite, w, h,
         geojson_source.color, geojson_source.line_width,
         geojson_source.marker_radius, geojson_source.opacity,
         cfg.info_font_path, geojson_source.font_size, source.sector,
+        geojson_source.fill, geojson_source.fill_opacity, geojson_source.icon,
     )
     cache_png = cfg.data_dir / f"overlay_geojson_cache_{cache_id}.png"
     cache_meta = cfg.data_dir / f"overlay_geojson_cache_{cache_id}.json"
 
     layer: Image.Image | None = None
-    if cache_png.exists() and cache_meta.exists():
+    if cfg.overlay_cache and cache_png.exists() and cache_meta.exists():
         try:
             if json.loads(cache_meta.read_text()) == key:
                 layer = Image.open(cache_png).convert("RGBA")
@@ -1791,6 +2211,7 @@ def render_static_geojson_overlay(img: Image.Image, cfg: Config, source: Effecti
             geojson_source.color, geojson_source.line_width,
             geojson_source.marker_radius, geojson_source.opacity,
             cfg.info_font_path, geojson_source.font_size, source.sector,
+            geojson_source.fill, geojson_source.fill_opacity, geojson_source.icon,
         )
         try:
             cfg.data_dir.mkdir(parents=True, exist_ok=True)
@@ -1894,6 +2315,7 @@ def draw_overlays(img: Image.Image, cfg: Config, overlays: OverlaysConfig, sourc
                     shell_source.color, shell_source.line_width,
                     shell_source.marker_radius, shell_source.opacity,
                     cfg.info_font_path, shell_source.font_size, source.sector,
+                    shell_source.fill, shell_source.fill_opacity, shell_source.icon,
                 )
             except Exception:
                 logging.exception(
@@ -1965,7 +2387,7 @@ def build_metadata(source: EffectiveSource, frame: FetchedFrame) -> dict[str, An
     now = datetime.now(timezone.utc)
 
     meta = {
-        "combo": source.name,
+        "pipeline": source.name,
         "satellite": source.satellite,
         "satellite_label": source.satellite_label(),
         "sector": source.sector,
@@ -2349,20 +2771,20 @@ def render_frame(
         has_georeferencing = _has_georeferencing(source, frame.area_info)
 
         did_reproject = False
-        if cfg.output_projection != "native" and not has_georeferencing:
+        if source.output_projection != "native" and not has_georeferencing:
             logging.warning(
                 "[%s] output_projection requires either a real per-frame area "
                 "(satpy_raw) or a calibrated cdn_jpg sector; source_kind=%s has "
                 "neither -- output_projection skipped, using the native projection",
                 source.name, source.source_kind,
             )
-        elif cfg.output_projection != "native":
-            center_lon = cfg.output_projection_center_lon
+        elif source.output_projection != "native":
+            center_lon = source.output_projection_center_lon
             if center_lon is None:
                 center_lon = _satellite_lon_0(source.satellite, source.sector, frame.area_info) or 0.0
-            center_lat = cfg.output_projection_center_lat if cfg.output_projection_center_lat is not None else 0.0
+            center_lat = source.output_projection_center_lat if source.output_projection_center_lat is not None else 0.0
             out_w = img.width
-            if cfg.output_projection in _BOUNDS_FRAMED_PROJECTIONS:
+            if source.output_projection in _BOUNDS_FRAMED_PROJECTIONS:
                 bounds = (source.crop_min_lon, source.crop_min_lat, source.crop_max_lon, source.crop_max_lat)
                 # A degrees-based aspect ratio approximation -- exact for platecarree,
                 # only approximate for lambertconformal's actual projected aspect, but
@@ -2376,8 +2798,8 @@ def render_frame(
 
             reprojected = reproject_frame(
                 img, source.satellite, source.sector, frame.area_info,
-                cfg.output_projection, bounds, center_lon, center_lat, out_w, out_h,
-                cfg.output_projection_lcc_lat1, cfg.output_projection_lcc_lat2,
+                source.output_projection, bounds, center_lon, center_lat, out_w, out_h,
+                source.output_projection_lcc_lat1, source.output_projection_lcc_lat2,
             )
             if reprojected is not None:
                 img = reprojected
@@ -2467,9 +2889,48 @@ def _write_render_to(path: Path, img: Image.Image, label: str = "") -> None:
     logging.info("%sRendered frame saved to %s (--render-to set, wallpaper not applied)", prefix, path)
 
 
+def apply_style_to_canvas(img: Image.Image, style: str, width: int, height: int) -> Image.Image:
+    """Bake wallpaper_style onto a width x height canvas ourselves, for
+    pipeline_mode = "files" output -- there's no OS wallpaper renderer to delegate
+    this to the way apply_wallpaper/apply_wallpaper_per_monitor do for a real
+    monitor. Mirrors what each platform backend's native style option does.
+    "span" has no single-file meaning (it's inherently about spanning multiple
+    monitors); degrades to "fill" with a logged warning, same pattern as
+    platform_linux_kde.py's span->fill fallback. Only called when a pipeline sets
+    both output_width/output_height -- see run_once_files."""
+    if style == "span":
+        logging.warning('wallpaper_style = "span" has no meaning for a single output_file; using "fill" instead.')
+        style = "fill"
+
+    if style == "fill":
+        return crop_to_screen(img, (width, height), 0.5)
+    if style == "stretch":
+        return img.resize((width, height), Image.LANCZOS)
+
+    fill = (0,) * len(img.getbands())
+    if style == "fit":
+        scale = min(width / img.width, height / img.height)
+        new_size = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
+        resized = img.resize(new_size, Image.LANCZOS)
+        canvas = Image.new(img.mode, (width, height), fill)
+        canvas.paste(resized, ((width - new_size[0]) // 2, (height - new_size[1]) // 2))
+        return canvas
+    if style == "center":
+        canvas = Image.new(img.mode, (width, height), fill)
+        canvas.paste(img, ((width - img.width) // 2, (height - img.height) // 2))
+        return canvas
+    if style == "tile":
+        canvas = Image.new(img.mode, (width, height), fill)
+        for y in range(0, height, img.height):
+            for x in range(0, width, img.width):
+                canvas.paste(img, (x, y))
+        return canvas
+    raise ValueError(f"Unknown wallpaper_style: {style!r}")
+
+
 def run_once(cfg: Config, overlays: OverlaysConfig, session: requests.Session, platform: WallpaperPlatform) -> bool:
-    """combo_mode = "single": fetch-crop-annotate-apply the one top-level configured
-    source. Returns True if the wallpaper changed."""
+    """pipeline_mode = "single": fetch-crop-annotate-apply the one top-level
+    configured source. Returns True if the wallpaper changed."""
     if should_skip_for_power(cfg, platform):
         return False
     prune_stale_geojson_cache(cfg)
@@ -2495,8 +2956,8 @@ def run_once(cfg: Config, overlays: OverlaysConfig, session: requests.Session, p
     if cfg.render_to:
         _write_render_to(cfg.render_to, img)
     else:
-        platform.apply_wallpaper(cfg.wallpaper_path, cfg.wallpaper_style)
-        logging.info("Wallpaper applied (style=%s)", cfg.wallpaper_style)
+        platform.apply_wallpaper(cfg.wallpaper_path, source.wallpaper_style)
+        logging.info("Wallpaper applied (style=%s)", source.wallpaper_style)
         if cfg.set_lock_screen:
             platform.apply_lock_screen(cfg.wallpaper_path)
             logging.info("Lock screen image applied")
@@ -2506,26 +2967,40 @@ def run_once(cfg: Config, overlays: OverlaysConfig, session: requests.Session, p
     return True
 
 
+def _next_rotation_pipeline(cfg: Config, state: dict[str, Any]) -> Pipeline:
+    """The pipeline "rotate" mode should show next, given state["pipeline_rotation_name"]
+    (the name of whichever pipeline was shown last cycle, or unset/stale on a first
+    run or a renamed/removed entry -- either case defaults to cfg.pipelines[0]).
+    Named rather than index-keyed so reordering/editing [[pipelines]] doesn't shift
+    what "next" means the way a raw index would. Shared by run_once_rotate (which
+    actually advances state) and _next_cycle_source_key (which only peeks)."""
+    names = [p.name for p in cfg.pipelines]
+    last_name = state.get("pipeline_rotation_name")
+    index = names.index(last_name) if last_name in names else -1
+    return cfg.pipelines[(index + 1) % len(cfg.pipelines)]
+
+
 def run_once_rotate(cfg: Config, overlays: OverlaysConfig, session: requests.Session, platform: WallpaperPlatform) -> bool:
-    """combo_mode = "rotate": cycle through cfg.combos one per cycle (index persisted
-    in state.json), applied as a single wallpaper just like "single" mode."""
-    if not cfg.combos:
-        raise ValueError('combo_mode = "rotate" requires at least one [[combos]] entry')
+    """pipeline_mode = "rotate": cycle through cfg.pipelines one per cycle (the
+    just-shown pipeline's name is persisted in state.json, not a raw index, so a
+    reordered/edited list doesn't shift what "next" means), applied as a single
+    wallpaper just like "single" mode."""
+    if not cfg.pipelines:
+        raise ValueError('pipeline_mode = "rotate" requires at least one [[pipelines]] entry')
     if should_skip_for_power(cfg, platform):
         return False
     prune_stale_geojson_cache(cfg)
 
     state = load_state(cfg)
-    index = state.get("combo_rotation_index", 0) % len(cfg.combos)
-    combo = cfg.combos[index]
-    source = resolve_source(cfg, combo)
+    pipeline = _next_rotation_pipeline(cfg, state)
+    source = resolve_source(cfg, pipeline)
     state["last_source_key"] = source.key
     maybe_wait_for_sync(cfg, state, source)
 
     screen_size = platform.get_screen_size(cfg.span_all_monitors, cfg.screen_width, cfg.screen_height, cfg.wmi_screen_size_fallback) if cfg.crop_to_screen else (0, 0)
     result = fetch_and_render(cfg, overlays, session, source, state, screen_size, platform)
     if result is None:
-        logging.info("[%s] Leaving current wallpaper in place", combo.name)
+        logging.info("[%s] Leaving current wallpaper in place", pipeline.name)
         save_state(cfg, state)
         return False
     img, meta = result
@@ -2533,66 +3008,69 @@ def run_once_rotate(cfg: Config, overlays: OverlaysConfig, session: requests.Ses
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     img.save(cfg.wallpaper_path, "JPEG", quality=92, exif=img.info.get("exif", b""))
     _atomic_write_text(cfg.metadata_path, json.dumps(meta, indent=2))
-    logging.info("[%s] Saved wallpaper + metadata to %s", combo.name, cfg.data_dir)
+    logging.info("[%s] Saved wallpaper + metadata to %s", pipeline.name, cfg.data_dir)
 
     if cfg.render_to:
-        _write_render_to(cfg.render_to, img, combo.name)
+        _write_render_to(cfg.render_to, img, pipeline.name)
     else:
-        platform.apply_wallpaper(cfg.wallpaper_path, cfg.wallpaper_style)
-        logging.info("[%s] Wallpaper applied (style=%s)", combo.name, cfg.wallpaper_style)
+        platform.apply_wallpaper(cfg.wallpaper_path, source.wallpaper_style)
+        logging.info("[%s] Wallpaper applied (style=%s)", pipeline.name, source.wallpaper_style)
         if cfg.set_lock_screen:
             platform.apply_lock_screen(cfg.wallpaper_path)
-            logging.info("[%s] Lock screen image applied", combo.name)
+            logging.info("[%s] Lock screen image applied", pipeline.name)
 
-    state["combo_rotation_index"] = (index + 1) % len(cfg.combos)
+    state["pipeline_rotation_name"] = pipeline.name
     state["last_applied_utc"] = datetime.now(timezone.utc).isoformat()
     save_state(cfg, state)
     return True
 
 
 def run_once_per_monitor(cfg: Config, overlays: OverlaysConfig, session: requests.Session, platform: WallpaperPlatform) -> bool:
-    """combo_mode = "per_monitor": each combo's `monitor` index gets its own
-    independently rendered+applied wallpaper. Monitors with no assigned combo are
-    left untouched. Returns True if any monitor was updated."""
-    if not cfg.combos:
-        raise ValueError('combo_mode = "per_monitor" requires at least one [[combos]] entry')
+    """pipeline_mode = "per_monitor": each pipeline's `monitor` index gets its own
+    independently rendered+applied wallpaper, with its own resolved wallpaper_style
+    (real per-monitor style on KDE/macOS; Windows can only apply one style for the
+    whole desktop -- see WallpaperPlatform.apply_wallpaper_per_monitor). Monitors
+    with no assigned pipeline are left untouched. Returns True if any monitor was
+    updated."""
+    if not cfg.pipelines:
+        raise ValueError('pipeline_mode = "per_monitor" requires at least one [[pipelines]] entry')
     if should_skip_for_power(cfg, platform):
         return False
     prune_stale_geojson_cache(cfg)
 
     state = load_state(cfg)
-    by_monitor = {combo.monitor: combo for combo in cfg.combos if combo.monitor is not None}
+    by_monitor = {p.monitor: p for p in cfg.pipelines if p.monitor is not None}
 
     monitors = platform.list_monitors()
     logging.info("Found %d active monitor(s)", len(monitors))
 
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
-    assignments: dict[str, Path] = {}
+    assignments: dict[str, tuple[Path, str]] = {}
     for i, monitor in enumerate(monitors):
-        combo = by_monitor.get(i)
-        if combo is None:
-            logging.info("Monitor %d has no assigned combo; leaving it untouched", i)
+        pipeline = by_monitor.get(i)
+        if pipeline is None:
+            logging.info("Monitor %d has no assigned pipeline; leaving it untouched", i)
             continue
 
-        source = resolve_source(cfg, combo)
+        source = resolve_source(cfg, pipeline)
         result = fetch_and_render(cfg, overlays, session, source, state, (monitor.width, monitor.height), platform)
         if result is None:
-            logging.info("[%s] Leaving monitor %d's wallpaper in place", combo.name, i)
+            logging.info("[%s] Leaving monitor %d's wallpaper in place", pipeline.name, i)
             continue
         img, meta = result
 
         out_path = cfg.data_dir / f"wallpaper_monitor{i}.jpg"
         img.save(out_path, "JPEG", quality=92, exif=img.info.get("exif", b""))
         _atomic_write_text(cfg.data_dir / f"wallpaper_monitor{i}.json", json.dumps(meta, indent=2))
-        assignments[monitor.id] = out_path
-        logging.info("[%s] Rendered for monitor %d (%s)", combo.name, i, monitor.id)
+        assignments[monitor.id] = (out_path, source.wallpaper_style)
+        logging.info("[%s] Rendered for monitor %d (%s)", pipeline.name, i, monitor.id)
 
         if cfg.render_to:
             render_path = cfg.render_to.with_stem(f"{cfg.render_to.stem}_monitor{i}")
-            _write_render_to(render_path, img, combo.name)
+            _write_render_to(render_path, img, pipeline.name)
 
     if assignments and not cfg.render_to:
-        platform.apply_wallpaper_per_monitor(assignments, cfg.wallpaper_style)
+        platform.apply_wallpaper_per_monitor(assignments)
         for i, monitor in enumerate(monitors):
             if monitor.id in assignments:
                 logging.info("Applied to monitor %d (%s)", i, monitor.id)
@@ -2602,10 +3080,53 @@ def run_once_per_monitor(cfg: Config, overlays: OverlaysConfig, session: request
     return bool(assignments)
 
 
+def run_once_files(cfg: Config, overlays: OverlaysConfig, session: requests.Session, platform: WallpaperPlatform) -> bool:
+    """pipeline_mode = "files": every pipeline with `output_file` set is
+    fetched/rendered/saved to that path every cycle, independent of any monitor or
+    OS wallpaper application -- no lock screen, no apply_wallpaper* call at all.
+    There's no monitor to cover-crop to, so crop_to_screen is skipped regardless of
+    cfg.crop_to_screen (resolution/crop_*/output_projection already control the
+    final framing/size). wallpaper_style is baked in ourselves via
+    apply_style_to_canvas when a pipeline sets both output_width/output_height;
+    left unset, the image is saved exactly as fetch_and_render produced it.
+    Pipelines without output_file are ignored. Returns True if any file was
+    written."""
+    file_pipelines = [p for p in cfg.pipelines if p.output_file]
+    if not file_pipelines:
+        raise ValueError('pipeline_mode = "files" requires at least one pipeline with `output_file` set')
+    if should_skip_for_power(cfg, platform):
+        return False
+    prune_stale_geojson_cache(cfg)
+
+    state = load_state(cfg)
+    wrote_any = False
+    for pipeline in file_pipelines:
+        source = resolve_source(cfg, pipeline)
+        result = fetch_and_render(cfg, overlays, session, source, state, (0, 0), platform)
+        if result is None:
+            logging.info("[%s] Leaving %s in place", pipeline.name, source.output_file)
+            continue
+        img, meta = result
+
+        if source.output_width is not None and source.output_height is not None:
+            img = apply_style_to_canvas(img, source.wallpaper_style, source.output_width, source.output_height)
+
+        out_path = Path(source.output_file)
+        _write_render_to(out_path, img, pipeline.name)
+        _atomic_write_text(out_path.with_suffix(".json"), json.dumps(meta, indent=2))
+        wrote_any = True
+
+    if wrote_any:
+        state["last_applied_utc"] = datetime.now(timezone.utc).isoformat()
+    save_state(cfg, state)
+    return wrote_any
+
+
 _CYCLE_FUNCS = {
     "single": run_once,
     "rotate": run_once_rotate,
     "per_monitor": run_once_per_monitor,
+    "files": run_once_files,
 }
 
 
@@ -2613,16 +3134,15 @@ def _next_cycle_source_key(cfg: Config, state: dict[str, Any]) -> str | None:
     """The source key whose learned capture phase should drive run_loop's next
     wake-up: the source that will actually be fetched *next* cycle, not just
     whichever one state["last_source_key"] recorded. In "rotate" mode those
-    differ — last_source_key is the combo just fetched, but combo_rotation_index
-    (already advanced by run_once_rotate before it saved state) points at the
-    *upcoming* combo, whose publish phase (different satellite/sector/product)
-    may not match. "single" mode has no such gap (same source every cycle, so
-    last_source_key already names it); "per_monitor" mode fetches several
-    sources per cycle, so there's no single phase to target — falls back to
-    plain clock-boundary alignment via the None here."""
-    if cfg.combo_mode == "rotate" and cfg.combos:
-        index = state.get("combo_rotation_index", 0) % len(cfg.combos)
-        return resolve_source(cfg, cfg.combos[index]).key
+    differ — last_source_key is the pipeline just fetched, but
+    pipeline_rotation_name (already advanced by run_once_rotate before it saved
+    state) points at the *upcoming* pipeline, whose publish phase (different
+    satellite/sector/product) may not match. "single" mode has no such gap (same
+    source every cycle, so last_source_key already names it); "per_monitor"/
+    "files" modes fetch several sources per cycle, so there's no single phase to
+    target — falls back to plain clock-boundary alignment via the None here."""
+    if cfg.pipeline_mode == "rotate" and cfg.pipelines:
+        return resolve_source(cfg, _next_rotation_pipeline(cfg, state)).key
     return state.get("last_source_key")
 
 
@@ -2631,10 +3151,10 @@ def run_loop(cfg: Config, overlays: OverlaysConfig, session: requests.Session, p
     so the effective cadence doesn't creep as each cycle's own runtime accumulates.
     When sync_to_capture_time is enabled, the boundary itself is nudged to line up
     with when fresh frames actually post rather than the raw clock tick — driven by
-    whichever source _next_cycle_source_key points at (unset in "per_monitor" mode,
-    since multiple sources are fetched per cycle there; falls back to plain
+    whichever source _next_cycle_source_key points at (unset in "per_monitor"/"files"
+    modes, since multiple sources are fetched per cycle there; falls back to plain
     clock-boundary alignment in that case)."""
-    cycle = _CYCLE_FUNCS[cfg.combo_mode]
+    cycle = _CYCLE_FUNCS[cfg.pipeline_mode]
     while True:
         try:
             cycle(cfg, overlays, session, platform)
@@ -2678,7 +3198,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--render-to", type=Path, dest="render_to",
         help="Also save the rendered frame(s) to this path and skip applying them as "
              "the desktop wallpaper (for testing a render without touching the real "
-             "wallpaper). With combo_mode = \"per_monitor\", writes one file per "
+             "wallpaper). With pipeline_mode = \"per_monitor\", writes one file per "
              "monitor with `_monitor{i}` inserted before the extension.",
     )
     p.add_argument("--wallpaper-style", choices=list(WALLPAPER_STYLE_NAMES), dest="wallpaper_style")
@@ -2686,10 +3206,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--set-lock-screen", action="store_const", const=True, dest="set_lock_screen",
         help="Also apply the rendered image as the lock screen image, not just the "
              "desktop wallpaper (Windows and KDE Plasma only so far; incompatible "
-             'with combo_mode = "per_monitor").',
+             'with pipeline_mode = "per_monitor"/"files").',
     )
     p.add_argument("--no-crop", action="store_const", const=False, dest="crop_to_screen")
     p.add_argument("--no-info-block", action="store_const", const=False, dest="info_block")
+    p.add_argument(
+        "--no-overlay-cache", action="store_const", const=False, dest="overlay_cache",
+        help="Force every geojson_sources entry to re-render every cycle instead of "
+             "reusing a cached layer -- useful while iterating on overlays.toml "
+             "styling/icons and wanting to see every change immediately.",
+    )
     p.add_argument("--span-all-monitors", action="store_const", const=True, dest="span_all_monitors")
     p.add_argument("--loop", action="store_const", const=True, dest="loop")
     p.add_argument(
@@ -2699,6 +3225,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument("--interval-minutes", type=int, dest="interval_minutes")
     p.add_argument("--log-level", dest="log_level")
+    p.add_argument(
+        "--log-to-stdout", action="store_const", const=True, dest="log_to_stdout",
+        help="Also print log output to the console, in addition to data_dir/log.txt "
+             "(which always gets it regardless) -- useful while debugging without "
+             "needing to tail the file separately.",
+    )
     return p.parse_args(argv)
 
 
@@ -2720,7 +3252,7 @@ def main(argv: list[str] | None = None) -> int:
         render_fallback_height=platform_probe_cfg.screen_height,
     )
     cfg = load_config(args.config, overrides, platform=platform)
-    validate_combos(cfg)
+    validate_pipelines(cfg)
     validate_source_kind(cfg)
     validate_lonlat_crop_bounds(cfg)
     validate_output_projection(cfg)
@@ -2740,7 +3272,7 @@ def main(argv: list[str] | None = None) -> int:
             if cfg.loop:
                 run_loop(cfg, overlays, session, platform)
             else:
-                _CYCLE_FUNCS[cfg.combo_mode](cfg, overlays, session, platform)
+                _CYCLE_FUNCS[cfg.pipeline_mode](cfg, overlays, session, platform)
         except KeyboardInterrupt:
             logging.info("Interrupted, exiting")
             return 130

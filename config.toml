@@ -3,10 +3,10 @@
 # without touching the script. Any key omitted here falls back to the script's
 # built-in default; any CLI flag passed at runtime overrides both.
 #
-# Note on section order: a TOML array-of-tables ([[combos]] below) header swallows
-# every plain `key = value` line that follows it until the next table header. To
-# avoid that footgun, it's placed at the very end, after all the plain scalar
-# settings — keep new scalar settings above it, not after.
+# Note on section order: a TOML array-of-tables ([[pipelines]] below) header
+# swallows every plain `key = value` line that follows it until the next table
+# header. To avoid that footgun, it's placed at the very end, after all the plain
+# scalar settings — keep new scalar settings above it, not after.
 #
 # Overlays (graticule, cities, GeoJSON files, a live shell-command source) live in a
 # separate file, overlays.toml, not here -- see OVERLAYS.md.
@@ -28,7 +28,7 @@ product = "GEOCOLOR"
 # NOAA serves discrete sizes per sector, not an arbitrary resize. Verified for CONUS:
 # 625x375, 1250x750, 2500x1500, 5000x3000, 10000x6000 (native ABI band-2 resolution).
 # 5000x3000 comfortably covers a 4K (3840x2160) monitor even after a full-frame crop;
-# bump to 10000x6000 if you crop aggressively (source_crop_*/combo crop_*) and want
+# bump to 10000x6000 if you crop aggressively (source_crop_*/pipeline crop_*) and want
 # more headroom — at the cost of a much bigger download every cycle. Full Disk's tiers
 # differ (verified: 1808x1808, 5424x5424, 10848x10848); Mesoscale untested.
 resolution = "5000x3000"
@@ -64,12 +64,16 @@ source_kind = "cdn_jpg"
 wallpaper_style = "fill"  # fill | fit | stretch | tile | center | span
 # set_lock_screen = true  # also apply the same image as the lock screen (Windows
                            # and KDE Plasma only so far; not supported with
-                           # combo_mode = "per_monitor")
+                           # pipeline_mode = "per_monitor"/"files")
 # render_to = "C:/Users/you/Desktop/test_render.jpg"  # save the rendered frame here
                            # and skip applying it as the wallpaper -- for testing
 # overlay_cache_max_age_days = 30  # delete overlay_geojson_cache_*.png/.json pairs
                            # unused this many days (e.g. a removed/renamed
                            # geojson_sources entry) -- 0 disables pruning
+# overlay_cache = false     # force every geojson_sources entry to re-render every
+                           # cycle instead of reusing a cached layer -- also
+                           # settable via --no-overlay-cache; useful while
+                           # iterating on overlays.toml styling/icons
 
 # --- Screen handling ---
 crop_to_screen = true
@@ -136,8 +140,9 @@ source_crop_bottom = 1.0
 #                        the visible hemisphere) without Mercator's polar blowup, at
 #                        the cost of shape distortion far from center.
 #
-# "native" (default) means no reprojection. Not combo-overridable. Note: cdn_jpg's
-# baked-in NOAA captions/borders warp along with everything else in any of these.
+# "native" (default) means no reprojection. Per-pipeline overridable -- see the
+# [[pipelines]] section below. Note: cdn_jpg's baked-in NOAA captions/borders warp
+# along with everything else in any of these.
 output_projection = "native"
 # output_projection_center_lon = -95.0
 # output_projection_center_lat = 25.0
@@ -147,29 +152,42 @@ output_projection = "native"
 # Georeferenced overlays (graticule, city/GeoJSON markers, a live shell-command
 # GeoJSON source) moved out of this file -- see overlays.toml and OVERLAYS.md.
 
-# --- Multi-source combos (optional) ---
-# Define named source+crop presets and how to use them. Ignored entirely unless
-# combo_mode is set below. Any field left unset on a combo falls back to the
-# top-level satellite/sector/product/resolution above; crop_left/top/right/bottom
-# always apply (default: no crop, same as source_crop_* above). crop_min_lon/min_lat/
-# max_lon/max_lat are also available per combo, following source_crop_min_lon's
-# fall-back-to-Config behavior rather than crop_left's always-active one.
-# output_projection itself isn't combo-overridable -- see above.
+# --- Named pipelines (optional) ---
+# Define named source+crop+projection+style presets and how to use them. Ignored
+# entirely unless pipeline_mode is set below. Any field left unset on a pipeline
+# falls back to the top-level satellite/sector/product/resolution/output_projection*/
+# wallpaper_style above; crop_left/top/right/bottom always apply (default: no crop,
+# same as source_crop_* above). crop_min_lon/min_lat/max_lon/max_lat are also
+# available per pipeline, following source_crop_min_lon's fall-back-to-Config
+# behavior rather than crop_left's always-active one.
 #
-# combo_mode:
-#   "single"      (default) - combos below are ignored.
-#   "rotate"      - cycle through combos one per cycle (state.json remembers where it
-#                   left off), applied as a single wallpaper like "single" mode.
-#   "per_monitor" - each combo's `monitor` (0-based, in the order Windows'
-#                   IDesktopWallpaper enumerates monitors — not necessarily the same
-#                   numbering as Display Settings) gets its own independently
-#                   rendered+applied wallpaper. Every combo must set `monitor` in this
-#                   mode, and each monitor with no assigned combo is left untouched.
-#                   Monitors are fetched sequentially, so total cycle time scales with
-#                   how many distinct combos are assigned.
-combo_mode = "single"
-# combos themselves (if combo_mode isn't "single") are defined via [[combos]] at the
-# end of this file -- see the note at the top.
+# pipeline_mode:
+#   "single"      (default) - pipelines below are ignored.
+#   "rotate"      - cycle through pipelines one per cycle (state.json remembers where
+#                   it left off, by name so reordering the list doesn't shift what
+#                   "next" means), applied as a single wallpaper like "single" mode.
+#   "per_monitor" - each pipeline's `monitor` (0-based, in the order the platform
+#                   backend enumerates monitors — not necessarily the same numbering
+#                   as your OS's display settings) gets its own independently
+#                   rendered+applied wallpaper, including its own wallpaper_style on
+#                   backends whose real API supports that (KDE, macOS) -- Windows can
+#                   only apply one style to the whole desktop, so it picks one and
+#                   logs a warning if the assigned pipelines actually differ. Every
+#                   pipeline must set `monitor` in this mode, and each monitor with no
+#                   assigned pipeline is left untouched. Monitors are fetched
+#                   sequentially, so total cycle time scales with how many distinct
+#                   pipelines are assigned.
+#   "files"       - every pipeline with `output_file` set is rendered straight to
+#                   that path every cycle instead of applied as a wallpaper (no
+#                   monitor, no lock screen). If `output_width`/`output_height` are
+#                   also set, wallpaper_style is baked into the saved file ourselves
+#                   (there's no OS wallpaper renderer to delegate to for a plain
+#                   file); left unset, the file is saved at whatever size
+#                   resolution/crop_*/output_projection already produced. Pipelines
+#                   without `output_file` are ignored in this mode.
+pipeline_mode = "single"
+# pipelines themselves (if pipeline_mode isn't "single") are defined via
+# [[pipelines]] at the end of this file -- see the note at the top.
 
 # --- Info block overlay ---
 info_block = true
@@ -228,26 +246,52 @@ skip_on_battery = false        # skip the whole cycle if running on battery powe
 # --- Misc ---
 skip_if_unchanged = true
 log_level = "INFO"
+# log_to_stdout = true      # also print log output to the console (also settable
+                           # via --log-to-stdout) -- data_dir/log.txt always gets
+                           # it regardless; useful while debugging without tailing
+                           # the file separately
 
-# --- Multi-source combos (array-of-tables; must come after every scalar setting
+# --- Named pipelines (array-of-tables; must come after every scalar setting
 # above -- see the note at the top of this file) ---
 # Example: rotate between GEOCOLOR and Clean IR on a single monitor.
-# [[combos]]
+# [[pipelines]]
 # name = "geocolor"
 # product = "GEOCOLOR"
 #
-# [[combos]]
+# [[pipelines]]
 # name = "clean_ir"
 # product = "13"
 
-# Example: a different source per monitor (requires combo_mode = "per_monitor").
-# [[combos]]
+# Example: a different source per monitor (requires pipeline_mode = "per_monitor"),
+# each with its own reprojection and style -- "primary" reprojects to a Lambert
+# conformal CONUS map and fills the screen; "secondary" stays in the satellite's
+# native view and fits within the screen instead of cropping.
+# [[pipelines]]
 # name = "primary_geocolor"
 # product = "GEOCOLOR"
 # monitor = 0
+# output_projection = "lambertconformal"
+# wallpaper_style = "fill"
 #
-# [[combos]]
+# [[pipelines]]
 # name = "secondary_westcoast_zoom"
 # satellite = "GOES18"
 # crop_left = 0.5
 # monitor = 1
+# wallpaper_style = "fit"
+
+# Example: pipeline_mode = "files" -- render a couple of static preview images every
+# cycle instead of applying a wallpaper at all. output_width/output_height bake
+# wallpaper_style into the saved file ourselves (there's no monitor/OS renderer to
+# delegate that to for a plain file); omit them to save unresized.
+# [[pipelines]]
+# name = "east_preview"
+# output_file = "previews/east.jpg"
+# output_width = 1920
+# output_height = 1080
+# wallpaper_style = "fill"
+#
+# [[pipelines]]
+# name = "west_preview_native_size"
+# satellite = "GOES18"
+# output_file = "previews/west.jpg"

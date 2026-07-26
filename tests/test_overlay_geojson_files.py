@@ -102,6 +102,36 @@ class TestRenderStaticGeojsonOverlay:
         assert calls == []  # cache hit -- layer builder never re-invoked
         assert _nonblack_pixel_count(second) == _nonblack_pixel_count(first)
 
+    def test_overlay_cache_false_forces_a_rebuild_even_on_an_exact_match(self, tmp_path, monkeypatch):
+        geojson_path = tmp_path / "cities.geojson"
+        _write_geojson(geojson_path, SF_POINT)
+        cfg = gw.Config(data_dir=tmp_path / "data", overlay_cache=False)
+        source = gw.GeoJSONSource(name="cities", files=(str(geojson_path),))
+        eff_source = _source()
+
+        gw.render_static_geojson_overlay(_blank(), cfg, eff_source, source)
+
+        calls = []
+        original = gw._build_geojson_layer
+        monkeypatch.setattr(gw, "_build_geojson_layer", lambda *a, **k: calls.append(1) or original(*a, **k))
+        gw.render_static_geojson_overlay(_blank(), cfg, eff_source, source)
+
+        assert calls == [1]  # rebuilt despite an identical, otherwise-cache-hit config
+
+    def test_overlay_cache_false_still_writes_a_fresh_cache_pair(self, tmp_path):
+        # So reuse resumes normally the next time overlay_cache is left at its
+        # default (true), rather than the disabled run leaving no cache at all.
+        geojson_path = tmp_path / "cities.geojson"
+        _write_geojson(geojson_path, SF_POINT)
+        data_dir = tmp_path / "data"
+        cfg = gw.Config(data_dir=data_dir, overlay_cache=False)
+        source = gw.GeoJSONSource(name="cities", files=(str(geojson_path),))
+        eff_source = _source()
+
+        gw.render_static_geojson_overlay(_blank(), cfg, eff_source, source)
+
+        assert len(list(data_dir.glob("overlay_geojson_cache_*.png"))) == 1
+
     def test_editing_source_file_invalidates_cache(self, tmp_path, monkeypatch):
         geojson_path = tmp_path / "cities.geojson"
         _write_geojson(geojson_path, SF_POINT)
@@ -158,6 +188,57 @@ class TestRenderStaticGeojsonOverlay:
 
         assert len(pngs_after_second) == len(pngs_after_first) + 1
 
+    def test_changing_fill_uses_a_separate_cache_entry(self, tmp_path):
+        geojson_path = tmp_path / "cities.geojson"
+        _write_geojson(geojson_path, SF_POINT)
+        data_dir = tmp_path / "data"
+        cfg = gw.Config(data_dir=data_dir)
+        eff_source = _source()
+
+        no_fill = gw.GeoJSONSource(name="cities", files=(str(geojson_path),))
+        gw.render_static_geojson_overlay(_blank(), cfg, eff_source, no_fill)
+        pngs_after_first = set(data_dir.glob("overlay_geojson_cache_*.png"))
+
+        with_fill = gw.GeoJSONSource(name="cities", files=(str(geojson_path),), fill=(200, 0, 0))
+        gw.render_static_geojson_overlay(_blank(), cfg, eff_source, with_fill)
+        pngs_after_second = set(data_dir.glob("overlay_geojson_cache_*.png"))
+
+        assert len(pngs_after_second) == len(pngs_after_first) + 1
+
+    def test_changing_fill_opacity_uses_a_separate_cache_entry(self, tmp_path):
+        geojson_path = tmp_path / "cities.geojson"
+        _write_geojson(geojson_path, SF_POINT)
+        data_dir = tmp_path / "data"
+        cfg = gw.Config(data_dir=data_dir)
+        eff_source = _source()
+
+        low_opacity = gw.GeoJSONSource(name="cities", files=(str(geojson_path),), fill=(200, 0, 0), fill_opacity=50)
+        gw.render_static_geojson_overlay(_blank(), cfg, eff_source, low_opacity)
+        pngs_after_first = set(data_dir.glob("overlay_geojson_cache_*.png"))
+
+        high_opacity = gw.GeoJSONSource(name="cities", files=(str(geojson_path),), fill=(200, 0, 0), fill_opacity=250)
+        gw.render_static_geojson_overlay(_blank(), cfg, eff_source, high_opacity)
+        pngs_after_second = set(data_dir.glob("overlay_geojson_cache_*.png"))
+
+        assert len(pngs_after_second) == len(pngs_after_first) + 1
+
+    def test_changing_icon_uses_a_separate_cache_entry(self, tmp_path):
+        geojson_path = tmp_path / "cities.geojson"
+        _write_geojson(geojson_path, SF_POINT)
+        data_dir = tmp_path / "data"
+        cfg = gw.Config(data_dir=data_dir)
+        eff_source = _source()
+
+        no_icon = gw.GeoJSONSource(name="cities", files=(str(geojson_path),))
+        gw.render_static_geojson_overlay(_blank(), cfg, eff_source, no_icon)
+        pngs_after_first = set(data_dir.glob("overlay_geojson_cache_*.png"))
+
+        with_icon = gw.GeoJSONSource(name="cities", files=(str(geojson_path),), icon="marker")
+        gw.render_static_geojson_overlay(_blank(), cfg, eff_source, with_icon)
+        pngs_after_second = set(data_dir.glob("overlay_geojson_cache_*.png"))
+
+        assert len(pngs_after_second) == len(pngs_after_first) + 1
+
     def test_different_name_uses_a_separate_cache_entry(self, tmp_path):
         # Two sources with identical files/style but different names must not
         # collide -- name is part of the cache identity precisely so independently
@@ -175,8 +256,8 @@ class TestRenderStaticGeojsonOverlay:
 
     def test_distinct_satellites_each_get_their_own_cache_entry(self, tmp_path, monkeypatch):
         # Regression test for a real bug: the cache used to live at one fixed
-        # filename regardless of satellite/resolution/style, so alternating combos
-        # across two satellites (e.g. combo_mode = "rotate"/"per_monitor") would
+        # filename regardless of satellite/resolution/style, so alternating pipelines
+        # across two satellites (e.g. pipeline_mode = "rotate"/"per_monitor") would
         # invalidate-and-overwrite each other's cache every single cycle -- never
         # actually caching anything. Each distinct (satellite, frame size, style)
         # must get its own cache file instead.
@@ -185,14 +266,14 @@ class TestRenderStaticGeojsonOverlay:
         data_dir = tmp_path / "data"
         cfg = gw.Config(data_dir=data_dir)
         source = gw.GeoJSONSource(name="cities", files=(str(geojson_path),))
-        combo_a = gw.resolve_source(gw.Config(satellite="GOES18", sector="CONUS"), None)
-        combo_b = gw.resolve_source(gw.Config(satellite="GOES19", sector="CONUS"), None)
+        pipeline_a = gw.resolve_source(gw.Config(satellite="GOES18", sector="CONUS"), None)
+        pipeline_b = gw.resolve_source(gw.Config(satellite="GOES19", sector="CONUS"), None)
 
         calls = []
         original = gw._build_geojson_layer
         monkeypatch.setattr(gw, "_build_geojson_layer", lambda *a, **k: calls.append(1) or original(*a, **k))
 
-        for eff_source in [combo_a, combo_b, combo_a, combo_b]:
+        for eff_source in [pipeline_a, pipeline_b, pipeline_a, pipeline_b]:
             gw.render_static_geojson_overlay(_blank(), cfg, eff_source, source)
 
         assert len(calls) == 2  # one build per distinct satellite, not per render call

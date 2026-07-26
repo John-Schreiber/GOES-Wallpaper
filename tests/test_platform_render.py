@@ -52,11 +52,11 @@ class TestNoDesktopShell:
 
     def test_apply_wallpaper_per_monitor_does_not_raise(self):
         RenderOnlyPlatform().apply_wallpaper_per_monitor(
-            {"0": Path("/tmp/wallpaper_monitor0.jpg")}, "fill"
+            {"0": (Path("/tmp/wallpaper_monitor0.jpg"), "fill")}
         )
 
     def test_apply_wallpaper_per_monitor_handles_empty_assignments(self):
-        RenderOnlyPlatform().apply_wallpaper_per_monitor({}, "fill")
+        RenderOnlyPlatform().apply_wallpaper_per_monitor({})
 
 
 class TestListMonitors:
@@ -70,7 +70,7 @@ class TestListMonitors:
     def test_synthetic_monitor_honors_configured_fallback_size(self):
         # list_monitors() has no per-call size parameters (unlike get_screen_size),
         # so a configured fallback -- not a call-time override -- is the only way to
-        # size combo_mode = "per_monitor"'s render on this backend.
+        # size pipeline_mode = "per_monitor"'s render on this backend.
         monitors = RenderOnlyPlatform(fallback_width=3840, fallback_height=2160).list_monitors()
         assert len(monitors) == 1
         assert monitors[0].width == 3840

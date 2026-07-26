@@ -28,8 +28,8 @@ def test_resolve_source_default_uses_top_level_config():
 
 def test_resolve_source_combo_overrides_only_set_fields():
     cfg = gw.Config(satellite="GOES19", sector="CONUS", product="GEOCOLOR", resolution="5000x3000")
-    combo = gw.Combo(name="west_ir", satellite="GOES18", product="13")
-    source = gw.resolve_source(cfg, combo)
+    pipeline = gw.Pipeline(name="west_ir", satellite="GOES18", product="13")
+    source = gw.resolve_source(cfg, pipeline)
     assert source.name == "west_ir"
     assert source.satellite == "GOES18"  # overridden
     assert source.product == "13"  # overridden
@@ -39,15 +39,15 @@ def test_resolve_source_combo_overrides_only_set_fields():
 
 def test_resolve_source_combo_crop_always_applies_even_when_default():
     cfg = gw.Config(source_crop_left=0.2)
-    combo = gw.Combo(name="c", crop_left=0.0)  # combo's own default (0.0), not cfg's 0.2
-    source = gw.resolve_source(cfg, combo)
+    pipeline = gw.Pipeline(name="c", crop_left=0.0)  # pipeline's own default (0.0), not cfg's 0.2
+    source = gw.resolve_source(cfg, pipeline)
     assert source.crop_left == 0.0
 
 
 def test_effective_source_key_distinguishes_sources():
     cfg = gw.Config()
-    a = gw.resolve_source(cfg, gw.Combo(name="a", product="GEOCOLOR"))
-    b = gw.resolve_source(cfg, gw.Combo(name="b", product="13"))
+    a = gw.resolve_source(cfg, gw.Pipeline(name="a", product="GEOCOLOR"))
+    b = gw.resolve_source(cfg, gw.Pipeline(name="b", product="13"))
     assert a.key != b.key
     assert a.key == f"{a.satellite}/{a.sector}/{a.product}/{a.resolution}"
 
@@ -75,15 +75,15 @@ def test_resolve_source_default_uses_top_level_source_kind():
 
 def test_resolve_source_combo_source_kind_overrides_config():
     cfg = gw.Config(source_kind="cdn_jpg")
-    combo = gw.Combo(name="raw", source_kind="satpy_raw")
-    source = gw.resolve_source(cfg, combo)
+    pipeline = gw.Pipeline(name="raw", source_kind="satpy_raw")
+    source = gw.resolve_source(cfg, pipeline)
     assert source.source_kind == "satpy_raw"
 
 
 def test_resolve_source_combo_falls_back_to_config_source_kind():
     cfg = gw.Config(source_kind="satpy_raw")
-    combo = gw.Combo(name="c")  # source_kind unset
-    source = gw.resolve_source(cfg, combo)
+    pipeline = gw.Pipeline(name="c")  # source_kind unset
+    source = gw.resolve_source(cfg, pipeline)
     assert source.source_kind == "satpy_raw"
 
 
@@ -115,15 +115,15 @@ def test_resolve_source_top_level_lonlat_crop_applies_with_no_combo():
 
 def test_resolve_source_combo_lonlat_crop_overrides_config():
     cfg = gw.Config(source_crop_min_lon=-110.0, source_crop_min_lat=30.0, source_crop_max_lon=-90.0, source_crop_max_lat=45.0)
-    combo = gw.Combo(name="c", crop_min_lon=-80.0, crop_min_lat=20.0, crop_max_lon=-70.0, crop_max_lat=30.0)
-    source = gw.resolve_source(cfg, combo)
+    pipeline = gw.Pipeline(name="c", crop_min_lon=-80.0, crop_min_lat=20.0, crop_max_lon=-70.0, crop_max_lat=30.0)
+    source = gw.resolve_source(cfg, pipeline)
     assert (source.crop_min_lon, source.crop_min_lat, source.crop_max_lon, source.crop_max_lat) == (-80.0, 20.0, -70.0, 30.0)
 
 
 def test_resolve_source_combo_falls_back_to_config_lonlat_crop_when_unset():
     cfg = gw.Config(source_crop_min_lon=-110.0, source_crop_min_lat=30.0, source_crop_max_lon=-90.0, source_crop_max_lat=45.0)
-    combo = gw.Combo(name="c")  # lon/lat crop fields unset
-    source = gw.resolve_source(cfg, combo)
+    pipeline = gw.Pipeline(name="c")  # lon/lat crop fields unset
+    source = gw.resolve_source(cfg, pipeline)
     assert (source.crop_min_lon, source.crop_min_lat, source.crop_max_lon, source.crop_max_lat) == (-110.0, 30.0, -90.0, 45.0)
 
 
@@ -134,15 +134,15 @@ def test_resolve_source_default_uses_top_level_image_path():
 
 def test_resolve_source_combo_image_path_overrides_config():
     cfg = gw.Config(source_kind="image_file", image_path="a.png")
-    combo = gw.Combo(name="c", source_kind="image_file", image_path="b.png")
-    source = gw.resolve_source(cfg, combo)
+    pipeline = gw.Pipeline(name="c", source_kind="image_file", image_path="b.png")
+    source = gw.resolve_source(cfg, pipeline)
     assert source.image_path == "b.png"
 
 
 def test_resolve_source_combo_falls_back_to_config_image_path():
     cfg = gw.Config(source_kind="image_file", image_path="a.png")
-    combo = gw.Combo(name="c", source_kind="image_file")  # image_path unset
-    source = gw.resolve_source(cfg, combo)
+    pipeline = gw.Pipeline(name="c", source_kind="image_file")  # image_path unset
+    source = gw.resolve_source(cfg, pipeline)
     assert source.image_path == "a.png"
 
 
@@ -150,3 +150,67 @@ def test_effective_source_key_ignores_product_resolution_for_image_file():
     cfg = gw.Config(source_kind="image_file", image_path="frame.png")
     source = gw.resolve_source(cfg, None)
     assert source.key == "image_file/frame.png"
+
+
+def test_resolve_source_default_uses_top_level_projection_and_style():
+    cfg = gw.Config(
+        output_projection="orthographic", output_projection_center_lon=-95.0,
+        output_projection_center_lat=25.0, output_projection_lcc_lat1=30.0,
+        output_projection_lcc_lat2=45.0, wallpaper_style="tile",
+    )
+    source = gw.resolve_source(cfg, None)
+    assert source.output_projection == "orthographic"
+    assert source.output_projection_center_lon == -95.0
+    assert source.output_projection_center_lat == 25.0
+    assert source.output_projection_lcc_lat1 == 30.0
+    assert source.output_projection_lcc_lat2 == 45.0
+    assert source.wallpaper_style == "tile"
+    assert source.output_file is None
+    assert source.output_width is None
+    assert source.output_height is None
+
+
+def test_resolve_source_pipeline_projection_and_style_override_config():
+    cfg = gw.Config(output_projection="native", wallpaper_style="fill")
+    pipeline = gw.Pipeline(
+        name="p", output_projection="lambertconformal", output_projection_lcc_lat1=30.0,
+        output_projection_lcc_lat2=45.0, wallpaper_style="fit",
+    )
+    source = gw.resolve_source(cfg, pipeline)
+    assert source.output_projection == "lambertconformal"
+    assert source.output_projection_lcc_lat1 == 30.0
+    assert source.output_projection_lcc_lat2 == 45.0
+    assert source.wallpaper_style == "fit"
+
+
+def test_resolve_source_pipeline_falls_back_to_config_projection_and_style():
+    cfg = gw.Config(output_projection="orthographic", wallpaper_style="span")
+    pipeline = gw.Pipeline(name="p")  # projection/style unset
+    source = gw.resolve_source(cfg, pipeline)
+    assert source.output_projection == "orthographic"
+    assert source.wallpaper_style == "span"
+
+
+def test_resolve_source_pipeline_projection_center_lat_zero_is_not_treated_as_unset():
+    # 0.0 is a legitimate latitude -- must use `is not None`, not truthiness, same
+    # as the lon/lat crop bounds fallback.
+    cfg = gw.Config(output_projection_center_lat=25.0)
+    pipeline = gw.Pipeline(name="p", output_projection_center_lat=0.0)
+    source = gw.resolve_source(cfg, pipeline)
+    assert source.output_projection_center_lat == 0.0
+
+
+def test_resolve_source_pipeline_output_file_and_size_pass_through():
+    cfg = gw.Config()
+    pipeline = gw.Pipeline(name="p", output_file="out/frame.jpg", output_width=1920, output_height=1080)
+    source = gw.resolve_source(cfg, pipeline)
+    assert source.output_file == "out/frame.jpg"
+    assert source.output_width == 1920
+    assert source.output_height == 1080
+
+
+def test_resolve_source_default_output_file_is_none():
+    # There's no Config-level output_file -- pipeline_mode = "single" (pipeline=None)
+    # never has a file target.
+    source = gw.resolve_source(gw.Config(), None)
+    assert source.output_file is None

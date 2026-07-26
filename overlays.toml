@@ -19,13 +19,15 @@ opacity = 110    # 0-255
 # feature's `properties.color` ([r, g, b]) overrides `color` below for that one
 # feature, and a Point/MultiPoint's `properties.name` draws a text label next to the
 # marker. `name` here (not a feature property) must be unique across geojson_sources
-# -- it's part of the cache key/filename, and shows up in log lines.
+# -- it's part of the cache key/filename, and shows up in log lines. See OVERLAYS.md
+# for fill/icon/simplestyle-spec property options beyond what's shown here.
 [[geojson_sources]]
 name = "cities"
 files = ["overlays/cities.geojson"]
-color = [255, 60, 60]
+color = [255, 140, 0]  # dark orange -- muted but still legible against night frames (near-black), not just day
 marker_radius = 5     # base size at ~2000px width; scales up with resolution
 font_size = 18         # base size at ~2000px width; scales up with resolution
+icon = "marker"        # bundled Maki icon (tinted with `color` above); see overlays/icons for the full set
 
 # More examples:
 # [[geojson_sources]]
@@ -42,15 +44,30 @@ font_size = 18         # base size at ~2000px width; scales up with resolution
 # there's no shell parsing, so no shell-injection risk), whose stdout is parsed as
 # GeoJSON and drawn the same way geojson_sources is. Unlike geojson_sources this is
 # never cached, since the whole point of shelling out is presumably to pick up
-# genuinely fresh data (e.g. a script that fetches live NHC storm tracks or NIFC fire
-# perimeters and prints GeoJSON). A non-zero exit code, a timeout, or unparseable
-# stdout is logged and skipped rather than breaking the update cycle.
-# [[shell_sources]]
-# name = "storm_tracks"
-# command = ["python", "fetch_storms.py"]
-# timeout = 10.0
-# color = [0, 200, 255]
-# line_width = 2
-# marker_radius = 5
-# opacity = 200
-# font_size = 14
+# genuinely fresh data (e.g. live NHC storm tracks or NIFC fire perimeters). A
+# non-zero exit code, a timeout, or unparseable stdout is logged and skipped
+# rather than breaking the update cycle.
+#
+# A real, working example: overlays/fetch_earthquakes.py fetches USGS's public
+# earthquake GeoJSON feed and adds marker-size/marker-color from each quake's
+# magnitude -- see that script's docstring to pick a different feed (more/less
+# frequent, lower/higher magnitude threshold).
+ [[shell_sources]]
+ name = "earthquakes"
+ command = ["python", "overlays/fetch_earthquakes.py"]
+ timeout = 15.0
+ marker_radius = 6
+ font_size = 14
+
+# Another real example: overlays/location/ has one "you are here" script per OS
+# (Windows/macOS/Linux), each querying that platform's own geolocation service
+# -- see overlays/location/README.md before picking one (each needs a small
+# extra install, and none has been tested against real hardware yet).
+[[shell_sources]]
+ name = "here"
+ command = ["python", "overlays/location/windows.py"]   # or macos.py / linux.py
+ # Must exceed the script's own internal position-fetch timeout (20s) -- shell_sources'
+ # own timeout kills the subprocess outright if it fires first, before the script's
+ # own graceful timeout/error message can even print.
+ timeout = 30.0
+ marker_radius = 10

@@ -2,6 +2,74 @@
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.4.0] — 2026-07-25 — named pipelines, GeoJSON rendering overhaul
+
+### Changed
+- **`Combo`/`combos`/`combo_mode` renamed to `Pipeline`/`pipelines`/
+  `pipeline_mode`**, and `Pipeline` grew from a source+crop-only bundle to also
+  carry `output_projection` (+ its 4 params) and `wallpaper_style` — both used to
+  be `Config`-global only, shared by every combo. Falls back to the top-level
+  `Config` value when unset, same `pipeline.field or cfg.field` idiom as
+  `satellite`/`sector`/etc. (see `resolve_source()`). Breaking config change --
+  run `migrate_pipeline_config.py path/to/config.toml` to rename an existing
+  `combo_mode`/`[[combos]]` in place (backs up the original to `.bak` first).
+- **Real per-monitor `wallpaper_style`.** `WallpaperPlatform.
+  apply_wallpaper_per_monitor` now takes `dict[str, tuple[Path, str]]` (style per
+  assignment, not one shared value). Honored for real on KDE (the D-Bus script's
+  payload already carries one entry per screen) and macOS (`NSWorkspace.
+  setDesktopImageURL_forScreen_options_error_` is a per-screen call) -- Windows'
+  `IDesktopWallpaper.SetPosition` has no per-monitor equivalent, so it applies one
+  style to the whole desktop and logs a warning when the assigned pipelines'
+  styles actually differ.
+- `state.json`'s `pipeline_mode = "rotate"` bookkeeping is now keyed by the shown
+  pipeline's *name* (`pipeline_rotation_name`), not a raw index
+  (`combo_rotation_index`) -- reordering/editing `[[pipelines]]` no longer shifts
+  what "next" means.
+- `wallpaper.json`/EXIF metadata's `"combo"` key renamed to `"pipeline"`.
+
+### Added
+- **`pipeline_mode = "files"`** -- every pipeline with `output_file` set renders
+  straight to that path every cycle instead of applying a wallpaper (no monitor,
+  no lock screen). With `output_width`/`output_height` also set, `wallpaper_style`
+  is baked into the saved file via the new `apply_style_to_canvas`
+  (fill/fit/stretch/tile/center; `span` has no single-file meaning and degrades to
+  `fill`, logged) since there's no OS wallpaper renderer to delegate that to for a
+  plain file. Left unset, the file saves at whatever size
+  `resolution`/crop/`output_projection` already produced.
+- **Anti-aliased GeoJSON/graticule rendering, polygon fill, custom point icons,
+  simplestyle-spec property names** (issue #17). Overlay drawing now goes
+  through [aggdraw](https://github.com/pytroll/aggdraw) (new hard dependency)
+  instead of raw `PIL.ImageDraw` -- smooth strokes/fills/circles; text labels
+  stay on `PIL.ImageDraw` (aggdraw has no font support). `GeoJSONSource`/
+  `ShellSource` gain `fill`/`fill_opacity` (Polygon/MultiPolygon now fill,
+  interior rings rendering as real holes) and `icon` (a bundled
+  [Maki](https://github.com/mapbox/maki) icon name -- the full CC0-1.0 set,
+  215 icons, is vendored under `vendor/maki/` and rasterized via
+  `scripts/rasterize_maki_icons.py` -- or a custom PNG path); a resolved icon
+  replaces the outlined-circle marker. Per-feature styling now prefers
+  simplestyle-spec property names (`stroke`/`stroke-width`/`stroke-opacity`/
+  `fill`/`fill-opacity`/`marker-color`/`marker-size`/`marker-symbol`), with the
+  older `properties.color` still honored as a fallback. See `OVERLAYS.md`'s
+  "GeoJSON styling rules" for the full precedence table.
+- **`overlay_cache`** (default `true`; also `--no-overlay-cache`) -- set false
+  to force every `geojson_sources` entry to re-render every cycle instead of
+  reusing a cached layer, e.g. while iterating on `overlays.toml`
+  styling/icons. A fresh cache pair is still written afterward, so reuse
+  resumes normally once left/set back to `true`.
+- **`log_to_stdout`** (default `false`; also `--log-to-stdout`) -- also print
+  log output to the console in addition to `data_dir/log.txt` (which always
+  gets it regardless), for debugging without tailing the file separately.
+- Two real `shell_sources` examples: `overlays/fetch_earthquakes.py` (USGS's
+  live earthquake GeoJSON feed, with `marker-size`/`marker-color` set from
+  magnitude, verified end-to-end against the live feed) and
+  `overlays/location/{windows,macos,linux}.py` (a "you are here" marker via
+  each OS's own geolocation service -- WinRT/CoreLocationCLI/GeoClue2
+  respectively; see `overlays/location/README.md`). `windows.py` is confirmed
+  working against real hardware (WinRT's `Geolocator` needs no packaging/
+  identity for a plain console script, matching this project's earlier
+  `LockScreen` finding -- just Default, not High, positioning accuracy to
+  avoid hanging on a desktop with no GPS); macOS/Linux are still unverified.
+
 ## [2.3.0] — 2026-07-19 — overlays.toml, image_file source, lock screen, hardening
 
 ### Added

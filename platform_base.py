@@ -49,7 +49,7 @@ WALLPAPER_STYLE_NAMES = ("fill", "fit", "stretch", "tile", "center", "span")
 @dataclass(slots=True)
 class MonitorInfo:
     """One physical monitor, in whatever stable enumeration order the backend
-    reports — config.toml's combo.monitor indices refer to this order."""
+    reports — config.toml's pipeline.monitor indices refer to this order."""
     id: str
     left: int
     top: int
@@ -108,10 +108,14 @@ class WallpaperPlatform(ABC):
         """One MonitorInfo per currently active physical monitor."""
 
     @abstractmethod
-    def apply_wallpaper_per_monitor(self, assignments: dict[str, Path], style: str) -> None:
-        """assignments: MonitorInfo.id -> image path, applied independently so each
-        monitor can show different content (unlike apply_wallpaper, which is one
-        image for the whole desktop)."""
+    def apply_wallpaper_per_monitor(self, assignments: dict[str, tuple[Path, str]]) -> None:
+        """assignments: MonitorInfo.id -> (image path, style), applied independently
+        so each monitor can show different content (unlike apply_wallpaper, which is
+        one image for the whole desktop) *and* its own style, on backends whose real
+        API supports that (KDE, macOS). Windows' IDesktopWallpaper.SetPosition has no
+        per-monitor equivalent -- WindowsPlatform applies one style to every monitor
+        and logs a warning when the assigned styles actually differ; see its
+        implementation."""
 
     @abstractmethod
     def get_power_state(self) -> PowerState:
@@ -172,7 +176,7 @@ def get_platform(
     hint at construction time). They exist because RenderOnlyPlatform.list_monitors()
     -- unlike get_screen_size() -- has no per-call size parameters at all (a fixed
     WallpaperPlatform signature shared with the real backends), so a
-    combo_mode = "per_monitor" render size can only reach it via construction.
+    pipeline_mode = "per_monitor" render size can only reach it via construction.
     goes_wallpaper.main() passes Config.screen_width/screen_height here.
 
     "auto" (default) preserves today's sys.platform/XDG_CURRENT_DESKTOP sniffing

@@ -212,20 +212,19 @@ class MacOSPlatform(WallpaperPlatform):
             )
         return monitors
 
-    def apply_wallpaper_per_monitor(self, assignments: dict[str, Path], style: str) -> None:
+    def apply_wallpaper_per_monitor(self, assignments: dict[str, tuple[Path, str]]) -> None:
         if not assignments:
             return
-        scaling, clipping = _resolve_style(style)
-        options = {
-            AppKit.NSWorkspaceDesktopImageScalingKey: scaling,
-            AppKit.NSWorkspaceDesktopImageAllowClippingKey: clipping,
-        }
+        # Unlike Windows' IDesktopWallpaper.SetPosition (whole-desktop only),
+        # NSWorkspace's setDesktopImageURL_forScreen_options_error_ takes options
+        # per screen call, so each monitor's own style resolves independently right
+        # here -- real per-monitor style, not a single shared one.
         workspace = AppKit.NSWorkspace.sharedWorkspace()
         screens_by_id = {
             str(int(screen.deviceDescription()["NSScreenNumber"])): screen
             for screen in AppKit.NSScreen.screens()
         }
-        for mon_id, path in assignments.items():
+        for mon_id, (path, style) in assignments.items():
             screen = screens_by_id.get(mon_id)
             if screen is None:
                 logging.warning(
@@ -233,6 +232,11 @@ class MacOSPlatform(WallpaperPlatform):
                     "currently active screen.", mon_id,
                 )
                 continue
+            scaling, clipping = _resolve_style(style)
+            options = {
+                AppKit.NSWorkspaceDesktopImageScalingKey: scaling,
+                AppKit.NSWorkspaceDesktopImageAllowClippingKey: clipping,
+            }
             url = Foundation.NSURL.fileURLWithPath_(str(path))
             ok, error = workspace.setDesktopImageURL_forScreen_options_error_(
                 url, screen, options, None

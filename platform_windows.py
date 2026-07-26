@@ -289,14 +289,28 @@ class WindowsPlatform(WallpaperPlatform):
         finally:
             comtypes.CoUninitialize()
 
-    def apply_wallpaper_per_monitor(self, assignments: dict[str, Path], style: str) -> None:
+    def apply_wallpaper_per_monitor(self, assignments: dict[str, tuple[Path, str]]) -> None:
+        # IDesktopWallpaper.SetPosition sets the wallpaper position/style for the
+        # whole desktop -- there's no per-monitor equivalent in this COM interface --
+        # so only one style can actually be honored per call. Pick the first
+        # (stable dict order) and warn if the assigned pipelines actually disagree,
+        # rather than silently dropping the others' styles.
         if not assignments:
             return
+        styles = {style for _, style in assignments.values()}
+        style = next(iter(assignments.values()))[1]
+        if len(styles) > 1:
+            logging.warning(
+                "Windows applies one wallpaper style to the whole desktop "
+                "(IDesktopWallpaper.SetPosition has no per-monitor equivalent); "
+                "using %r for every monitor, ignoring: %s",
+                style, sorted(styles - {style}),
+            )
         comtypes.CoInitialize()
         try:
             idw = comtypes.client.CreateObject(_CLSID_DESKTOP_WALLPAPER, interface=_IDesktopWallpaper)
             idw.SetPosition(_WALLPAPER_STYLE_CODES.get(style, _WALLPAPER_STYLE_CODES["fill"]).position)
-            for mon_id, path in assignments.items():
+            for mon_id, (path, _) in assignments.items():
                 idw.SetWallpaper(mon_id, str(path))
         finally:
             comtypes.CoUninitialize()

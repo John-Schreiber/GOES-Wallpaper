@@ -57,7 +57,7 @@ class RenderOnlyPlatform(WallpaperPlatform):
     _FALLBACK_SIZE if left unset. They exist specifically for list_monitors(),
     which -- unlike get_screen_size() -- takes no per-call size arguments at all
     (it's a fixed WallpaperPlatform abstract method signature shared with the
-    real hardware-detecting backends), so this is the only place combo_mode =
+    real hardware-detecting backends), so this is the only place pipeline_mode =
     "per_monitor" can be sized on a backend with no real monitor to detect.
     get_platform() forwards config.toml's screen_width/screen_height here for the
     "render" override -- see its docstring."""
@@ -97,8 +97,8 @@ class RenderOnlyPlatform(WallpaperPlatform):
         width, height = self._fallback_size
         return [MonitorInfo(_SYNTHETIC_MONITOR_ID, 0, 0, width, height)]
 
-    def apply_wallpaper_per_monitor(self, assignments: dict[str, Path], style: str) -> None:
-        for mon_id, path in assignments.items():
+    def apply_wallpaper_per_monitor(self, assignments: dict[str, tuple[Path, str]]) -> None:
+        for mon_id, (path, _style) in assignments.items():
             logging.info(
                 "Render-only backend: not applying %s to monitor %s "
                 "(no desktop shell to apply it to).", path, mon_id,

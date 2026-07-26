@@ -10,7 +10,7 @@ satellite/sector/product and capture time.
 ## Contents
 
 [Install](#install) · [Configuration](#configuration) ·
-[Multi-source combos](#multi-source-combos) ·
+[Named pipelines](#named-pipelines) ·
 [Georeferenced overlays](#georeferenced-overlays) (full schema: [OVERLAYS.md](OVERLAYS.md)) ·
 [Output projection](#output-projection) (gallery: [PROJECTIONS.md](PROJECTIONS.md)) ·
 [Custom raw-data source (satpy_raw)](#custom-raw-data-source-satpy_raw) ·
@@ -60,7 +60,7 @@ goes-wallpaper --config path\to\config.toml
 ```
 
 (Same command on every OS/shell. Pin a specific release instead of tracking
-`main` by appending a tag, e.g. `...GOES-Wallpaper@v2.3.0`.) This installs two
+`main` by appending a tag, e.g. `...GOES-Wallpaper@v2.4.0`.) This installs two
 entry points: `goes-wallpaper` (console) and `goes-wallpaperw` (no console
 popup — for a Task Scheduler/shortcut-style launch). An installed copy has no
 `config.toml` next to it, unlike a source checkout — pass `--config`
@@ -77,7 +77,7 @@ comment; the highlights:
   (`CONUS`, `FD` full disk, `M1`/`M2` mesoscale), `product` (e.g. `GEOCOLOR`),
   `resolution`. NOAA serves discrete sizes per sector, not an arbitrary resize.
   Default is `5000x3000`, enough to cover a 4K monitor without upsampling —
-  bump higher if you crop aggressively via `source_crop_*`/combos.
+  bump higher if you crop aggressively via `source_crop_*`/pipelines.
 * **`source_kind`** — `"cdn_jpg"` (default, the above), `"satpy_raw"`
   (composite your own image from raw satellite data instead — heavier, opt-in;
   see [Custom raw-data source](#custom-raw-data-source-satpy_raw) below), or
@@ -102,41 +102,56 @@ comment; the highlights:
 * **`set_lock_screen`** (default off) — also apply the same rendered image as the
   lock screen image, not just the desktop wallpaper. Windows and KDE Plasma only
   so far (see [Cross-platform](#cross-platform)); not supported with
-  `combo_mode = "per_monitor"`. Always mirrors the desktop wallpaper exactly — no
-  independent crop/style of its own yet.
+  `pipeline_mode = "per_monitor"`/`"files"`. Always mirrors the desktop wallpaper
+  exactly — no independent crop/style of its own yet.
 * Any field can also be set via CLI flag, e.g. `--sector FD --no-info-block`.
   Run `uv run python goes_wallpaper.py --help` for the full list.
-* **Multi-source combos** — `combo_mode` (`"single"` / `"rotate"` /
-  `"per_monitor"`) plus a list of named `[[combos]]`. See
-  [Multi-source combos](#multi-source-combos) below.
+* **Named pipelines** — `pipeline_mode` (`"single"` / `"rotate"` /
+  `"per_monitor"` / `"files"`) plus a list of named `[[pipelines]]`. See
+  [Named pipelines](#named-pipelines) below.
 * **Georeferenced overlays** — a lat/lon grid, city markers, GeoJSON files, and a
   live shell-command GeoJSON source, configured separately in `overlays.toml`.
   See [OVERLAYS.md](OVERLAYS.md).
 * **`output_projection`** — reproject the frame into `platecarree`/
   `lambertconformal`/`orthographic`/`lambertazimuthal` instead of the satellite's
-  native view. See [Output projection](#output-projection) below.
+  native view. Per-pipeline overridable. See [Output projection](#output-projection)
+  below.
 
-## Multi-source combos
+## Named pipelines
 
-Beyond the single top-level source, `config.toml` can define named combos and a
-`combo_mode` for how to use them:
+Beyond the single top-level source, `config.toml` can define named pipelines --
+each its own source+crop+`output_projection`+`wallpaper_style` bundle -- and a
+`pipeline_mode` for how to use them:
 
-* **`"rotate"`** cycles through the combo list one per cycle — each `--loop`
-  cycle (or scheduled run) shows a different source/crop, remembering where it
-  left off in `state.json`. Good for variety on a single monitor, e.g.
-  alternating GEOCOLOR/Clean IR or GOES East/West.
-* **`"per_monitor"`** assigns one combo per physical monitor via `monitor`
+* **`"rotate"`** cycles through the pipeline list one per cycle — each `--loop`
+  cycle (or scheduled run) shows a different source/crop/projection/style,
+  remembering where it left off in `state.json` (by pipeline name, so reordering
+  the list doesn't shift what "next" means). Good for variety on a single
+  monitor, e.g. alternating GEOCOLOR/Clean IR or GOES East/West.
+* **`"per_monitor"`** assigns one pipeline per physical monitor via `monitor`
   (0-based) and applies each independently — genuinely different images per
-  screen, not one image spanned/tiled across all of them. Every combo needs a
-  `monitor` in this mode; an unassigned monitor is left untouched. Each combo
-  triggers its own download, so cycle time scales with how many you assign.
+  screen, not one image spanned/tiled across all of them, including each
+  pipeline's own `wallpaper_style` on backends whose real API supports
+  independent per-monitor style (KDE, macOS). Windows can only apply one style to
+  the whole desktop (`IDesktopWallpaper.SetPosition` has no per-monitor
+  equivalent) — it picks one and logs a warning if the assigned pipelines'
+  styles actually differ. Every pipeline needs a `monitor` in this mode; an
+  unassigned monitor is left untouched. Each pipeline triggers its own download,
+  so cycle time scales with how many you assign.
+* **`"files"`** renders every pipeline with `output_file` set straight to that
+  path every cycle instead of applying a wallpaper at all — no monitor, no lock
+  screen. Set `output_width`/`output_height` on a pipeline to also bake
+  `wallpaper_style` into the saved file ourselves (there's no OS wallpaper
+  renderer to delegate that to for a plain file); leave them unset to save the
+  image at whatever size `resolution`/crop/`output_projection` already produced.
+  Pipelines without `output_file` are ignored in this mode.
 
-An unset combo field falls back to the top-level `satellite`/`sector`/`product`/
-`resolution`; the crop fields (`crop_left/top/right/bottom`) always apply,
-defaulting to no crop. `crop_min_lon/min_lat/max_lon/max_lat` behave like the
-source-selection fields instead — unset falls back to the top-level
-`source_crop_*` rather than always applying. See the commented examples in
-[config.toml](config.toml).
+An unset pipeline field falls back to the top-level `satellite`/`sector`/
+`product`/`resolution`/`output_projection`/`wallpaper_style`; the crop fields
+(`crop_left/top/right/bottom`) always apply, defaulting to no crop.
+`crop_min_lon/min_lat/max_lon/max_lat` behave like the source-selection fields
+instead — unset falls back to the top-level `source_crop_*` rather than always
+applying. See the commented examples in [config.toml](config.toml).
 
 Note: the `monitor` index is the platform backend's own enumeration order, which
 isn't guaranteed to match the numbers shown in your OS's display settings — swap
@@ -166,9 +181,10 @@ reprojection.
   `output_projection_center_lon`/`_center_lat` (default: the source's own
   sub-satellite point and the equator).
 
-Works for both `cdn_jpg` (CONUS/Full Disk) and `satpy_raw` (any sector). Not
-combo-overridable — every combo shares one `output_projection`. Falls back to
-native, logged, if there's no calibration for the resolved satellite/sector.
+Works for both `cdn_jpg` (CONUS/Full Disk) and `satpy_raw` (any sector).
+Per-pipeline overridable — see [Named pipelines](#named-pipelines) above. Falls
+back to native, logged, if there's no calibration for the resolved
+satellite/sector.
 
 Two known quality caveats, both nearest-neighbor resampling artifacts: no
 anti-aliasing at the valid-data/black boundary in `orthographic`/
@@ -195,7 +211,7 @@ uv sync --extra satpy-raw
 # or: pip install goes-wallpaper[satpy-raw]
 ```
 
-Then set, top-level or per-combo:
+Then set, top-level or per-pipeline:
 
 ```toml
 source_kind = "satpy_raw"
@@ -324,7 +340,7 @@ script can't strip out:
   ends up on the `1024x768` fallback.
 * **`span_all_monitors`** requires Windows 8+ for the `"span"` wallpaper style
   to actually stretch one image across all displays; see
-  [Multi-source combos](#multi-source-combos) above for genuinely different
+  [Named pipelines](#named-pipelines) above for genuinely different
   images per monitor instead.
 
 ## Tests
@@ -350,7 +366,11 @@ uv run python goes_wallpaper.py --render-to test_render.jpg
 
 This runs one full fetch/crop/overlay/info-block cycle and saves the result to
 the given path, skipping `apply_wallpaper()` — useful for checking a new
-`source_kind`, overlay, or crop setting before enabling it for real.
+`source_kind`, overlay, or crop setting before enabling it for real. Add
+`--log-to-stdout` to also see log output live in the console instead of only
+in `data_dir/log.txt` — handy while debugging a `shell_sources`/`geojson_sources`
+entry. `--no-overlay-cache` forces `geojson_sources` to re-render every cycle
+instead of reusing a cached layer, for the same reason (see `OVERLAYS.md`).
 
 ## Contributing
 

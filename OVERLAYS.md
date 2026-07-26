@@ -67,6 +67,10 @@ line_width = 1
 marker_radius = 5
 opacity = 160    # 0-255
 font_size = 14
+# fill = [80, 80, 200]     # Polygon/MultiPolygon fill; unset (default) = outline only
+# fill_opacity = 120       # 0-255, only used when fill is set
+# icon = "marker"          # a bundled Maki icon name, or a path to your own PNG --
+#                          # replaces the outlined circle for Point/MultiPoint features
 ```
 
 Repeatable — add as many `[[geojson_sources]]` blocks as you want, each
@@ -85,6 +89,13 @@ old one — the orphaned pair is deleted automatically once it's gone unused for
 `overlay_cache_max_age_days` (30 by default; 0 disables this). Every cache hit
 touches both files' timestamps, so an entry still in active use is never
 pruned no matter how old its content is.
+
+Set `overlay_cache = false` (or pass `--no-overlay-cache`) to skip checking for
+an existing match entirely and force a fresh render every cycle — useful while
+iterating on styling/icons and wanting to see every change immediately, rather
+than reasoning about whether the cache key actually picked it up. A fresh cache
+pair is still written afterward, so reuse resumes normally once this is back at
+its default (`true`).
 
 `overlays/cities.geojson` (the shipped example):
 
@@ -117,12 +128,25 @@ line_width = 2
 marker_radius = 5
 opacity = 200
 font_size = 14
+# fill = [200, 60, 60]
+# fill_opacity = 120
+# icon = "danger"          # a bundled Maki icon name -- see the full list below
 ```
 
 Also repeatable, but never cached — the point of shelling out is presumably
 fresh data (live storm tracks, fire perimeters). A non-zero exit code, a
 timeout, or unparseable stdout is logged and skipped rather than breaking the
 update cycle; one broken source doesn't block others.
+
+Two real, working examples ship in `overlays/`:
+[`fetch_earthquakes.py`](overlays/fetch_earthquakes.py) fetches USGS's public
+earthquake GeoJSON feed and adds `marker-size`/`marker-color` from each quake's
+magnitude; [`location/`](overlays/location) has one "you are here" script per
+OS (Windows/macOS/Linux), each querying that platform's own geolocation
+service — see [`overlays/location/README.md`](overlays/location/README.md)
+before using one (each needs a small extra install, and none has been tested
+against real hardware yet — see its own docstring for exactly what's
+unconfirmed).
 
 **Security note:** `command` is a code-execution surface by design — it runs
 whatever argv you configure, every cycle. That's the feature working as
@@ -134,31 +158,65 @@ users than whoever runs `goes_wallpaper`.
 ## GeoJSON styling rules
 
 Both `geojson_sources` and `shell_sources` draw through the same shared code
-(`_build_geojson_layer`), so they're styled identically:
+(`_build_geojson_layer`), so they're styled identically. Rendering goes through
+[aggdraw](https://github.com/pytroll/aggdraw) (Anti-Grain Geometry), not raw
+`PIL.ImageDraw` — strokes, fills, and marker circles are all anti-aliased,
+matching the info block/EXIF text and everything else drawn on the frame.
 
 * **Geometry type decides the draw call.** `Point`/`MultiPoint` → an outlined
-  circle (`marker_radius`, stroke `line_width`). `LineString`/
-  `MultiLineString` → an open polyline. `Polygon`/`MultiPolygon` → each ring
-  as a *closed, outlined* loop — **not filled**, no fill-color config. Any
-  other/missing geometry type is silently skipped, not an error.
+  circle (`marker_radius`, stroke `line_width`) or a pasted icon (see below).
+  `LineString`/`MultiLineString` → an open polyline. `Polygon`/`MultiPolygon`
+  → each ring stroked, and filled if `fill` resolves to something (an entry's
+  own `fill` config, or a feature's `properties.fill`) — interior rings render
+  as real holes (e.g. a country polygon with a lake cut out), not a solid
+  block, as long as every ring's vertices project onto the frame; a ring that
+  partly falls off-frame falls back to outline-only for that polygon (a
+  filled ring has no equivalent to a stroked line's "break at the edge").
+  Any other/missing geometry type is silently skipped, not an error.
+* **Custom icons for points.** Set `icon` (an entry-wide default) and/or a
+  feature's `properties.icon` to either a name from the bundled
+  [Maki](https://github.com/mapbox/maki) icon set (CC0-1.0; run
+  `ls overlays/icons` for the full list of ~215 names, e.g. `"marker"`,
+  `"star"`, `"fire-station"`, `"hospital"`) or a path to your own PNG — either
+  replaces the outlined circle entirely for that feature (the label still
+  draws next to it). A bundled icon is a recolorable silhouette and gets
+  tinted with the feature's resolved marker/stroke color; a custom PNG keeps
+  its own colors untouched. `properties.marker-symbol` (the real
+  simplestyle-spec field) also resolves against the bundled set only, not an
+  arbitrary path — `icon`/`properties.icon` is this project's broader
+  extension and takes precedence when both are set on the same feature. An
+  unrecognized name/path is logged and falls back to the outlined circle.
 * **`Point`/`MultiPoint` get a text label from `properties.name`**, drawn next
-  to the marker (`font_size`, using `info_font_path`, falling back to a
+  to the marker or icon (`font_size`, using `info_font_path`, falling back to a
   built-in font). No `name` means no label. A `MultiPoint`'s single `name` is
   drawn next to every point in it. `LineString`/`Polygon` ignore
   `properties.name` — no single anchor point to label.
-* **Only color and (for points) the label are overridable per feature.** A
-  feature's `properties.color` replaces the entry's `color` for that feature —
-  accepts `[r, g, b]`, a hex string, or any of PIL's ~140 named colors, so
-  GeoJSON from common tools (geojson.io, GitHub's simplestyle-spec) works
-  as-is. An unparseable value falls back to the entry's `color` (logged)
-  rather than losing the whole overlay. Line width, marker radius, opacity,
-  and font size always come from the entry's config, not per-feature.
-* **Opacity** is a single alpha value (0–255) applied uniformly to every
-  feature in that entry, not adjustable per feature.
+* **Per-feature style overrides prefer [simplestyle-spec](https://github.com/mapbox/simplestyle-spec)
+  property names**, with this project's older ad hoc names still honored as a
+  fallback so existing GeoJSON keeps working unchanged:
+  | Concern | simplestyle name | legacy fallback | entry-level config |
+  |---|---|---|---|
+  | Stroke color | `stroke` | `color` | `color` |
+  | Stroke width | `stroke-width` | — | `line_width` |
+  | Stroke opacity | `stroke-opacity` (0.0–1.0) | — | `opacity` (0–255) |
+  | Fill color | `fill` | — | `fill` |
+  | Fill opacity | `fill-opacity` (0.0–1.0) | — | `fill_opacity` (0–255) |
+  | Marker color (points) | `marker-color` | `stroke`, then `color` | `color` |
+  | Marker size (points) | `marker-size` (`"small"`/`"medium"`/`"large"` → 0.6×/1.0×/1.6×) | — | `marker_radius` |
+
+  Colors accept `[r, g, b]`, a hex string, or any of PIL's ~140 named colors,
+  so GeoJSON from common tools (geojson.io, simplestyle-spec exporters) works
+  as-is. An unparseable value falls back to the entry's config (logged) rather
+  than losing the whole overlay. Font size always comes from the entry's
+  config, not per-feature — simplestyle has no equivalent field.
 * **Line width and marker radius scale with output resolution**, like
   `[graticule]` — tuned for a ~2000px-wide frame, scaling proportionally at
-  higher `resolution`.
+  higher `resolution`. A `properties.stroke-width` override scales the same
+  way; `properties.marker-size` is a multiplier on top of the already-scaled
+  `marker_radius`.
 * **A point/vertex projecting outside the visible frame breaks the line/ring
-  there** rather than drawing a stray edge across the image. A `Polygon` with
-  a corner just outside the frame renders as an open outline missing the two
-  edges at that corner, not a rubber-banded line back across the image.
+  there** rather than drawing a stray edge across the image, for strokes and
+  unfilled polygons. A `Polygon` with a corner just outside the frame renders
+  as an open outline missing the two edges at that corner, not a
+  rubber-banded line back across the image — see the fill note above for how
+  a filled polygon differs.

@@ -1,7 +1,7 @@
 # Minimal starting point for goes_wallpaper.py --config.
 #
 # This is deliberately short — just the settings most people actually want to change
-# on day one. Every other option (source-crop framing, multi-source combos,
+# on day one. Every other option (source-crop framing, named pipelines,
 # georeferenced overlays, freshness-sync tuning, power/network-aware fallbacks, ...)
 # has its own documented default and doesn't need to be listed here to work; see
 # config.toml in the repo for the full annotated reference if you want to see or

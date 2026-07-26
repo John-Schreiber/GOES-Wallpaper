@@ -58,3 +58,16 @@ unfilled — reproduced here exactly as committed.
   `noaa-goes18`/`noaa-goes19` AWS S3 buckets — freely available thanks to
   NOAA's open-data policy. Thanks to NOAA/NESDIS for keeping taxpayer-funded
   satellite data free and open.
+
+## Assets
+
+- **Bundled point icons** (`icon`/`properties.icon`/`properties.marker-symbol`
+  on `geojson_sources`/`shell_sources`, see `OVERLAYS.md`) are rasterized from
+  [Mapbox's Maki icon set](https://github.com/mapbox/maki) (commit
+  `28e2a3602e4bde033a1dd388e86e9c117b425e34`, 2025-06-23), vendored in full
+  under `vendor/maki/` (SVG source + its own `LICENSE.txt`) and converted to
+  the PNGs actually shipped/read at runtime (`overlays/icons/`) by
+  `scripts/rasterize_maki_icons.py`. Licensed **CC0-1.0** (public domain) — no
+  attribution is legally required, credited here anyway in keeping with this
+  file's practice of documenting where things came from. See
+  `vendor/maki/README.md` for re-vendoring/re-rendering instructions.

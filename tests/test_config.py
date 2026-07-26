@@ -1,4 +1,4 @@
-# tests/test_config.py -- config loading, combo parsing, validate_combos
+# tests/test_config.py -- config loading, pipeline parsing, validate_pipelines
 # Copyright (C) 2026 John-Schreiber
 # SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -30,7 +30,7 @@ class TestLoadConfig:
     def test_missing_file_uses_defaults(self, tmp_path):
         cfg = gw.load_config(tmp_path / "does-not-exist.toml", {})
         assert cfg.satellite == "GOES19"
-        assert cfg.combo_mode == "single"
+        assert cfg.pipeline_mode == "single"
 
     def test_toml_values_override_defaults(self, tmp_path):
         p = write_toml(tmp_path, 'satellite = "GOES18"\nsector = "FD"\n')
@@ -85,79 +85,123 @@ class TestLoadConfig:
         cfg = gw.load_config(p, {})
         assert cfg.retry_statuses == (500, 502)
 
-    def test_combos_parsed_into_dataclasses(self, tmp_path):
+    def test_pipelines_parsed_into_dataclasses(self, tmp_path):
         p = write_toml(tmp_path, '''
-combo_mode = "rotate"
+pipeline_mode = "rotate"
 
-[[combos]]
+[[pipelines]]
 name = "a"
 product = "GEOCOLOR"
 
-[[combos]]
+[[pipelines]]
 name = "b"
 product = "13"
 monitor = 1
 ''')
         cfg = gw.load_config(p, {})
-        assert cfg.combo_mode == "rotate"
-        assert len(cfg.combos) == 2
-        assert all(isinstance(c, gw.Combo) for c in cfg.combos)
-        assert cfg.combos[0].name == "a"
-        assert cfg.combos[1].monitor == 1
+        assert cfg.pipeline_mode == "rotate"
+        assert len(cfg.pipelines) == 2
+        assert all(isinstance(c, gw.Pipeline) for c in cfg.pipelines)
+        assert cfg.pipelines[0].name == "a"
+        assert cfg.pipelines[1].monitor == 1
 
-    def test_unknown_combo_key_raises(self, tmp_path):
+    def test_unknown_pipeline_key_raises(self, tmp_path):
         p = write_toml(tmp_path, '''
-[[combos]]
+[[pipelines]]
 name = "a"
 bogus_key = 1
 ''')
-        with pytest.raises(ValueError, match=r"combos\[0\]"):
+        with pytest.raises(ValueError, match=r"pipelines\[0\]"):
             gw.load_config(p, {})
 
-class TestValidateCombos:
+class TestValidatePipelines:
     def test_single_mode_always_valid(self):
-        gw.validate_combos(gw.Config(combo_mode="single"))  # no raise, even with no combos
+        gw.validate_pipelines(gw.Config(pipeline_mode="single"))  # no raise, even with no pipelines
 
     def test_bogus_mode_raises(self):
-        with pytest.raises(ValueError, match="combo_mode must be one of"):
-            gw.validate_combos(gw.Config(combo_mode="bogus"))
+        with pytest.raises(ValueError, match="pipeline_mode must be one of"):
+            gw.validate_pipelines(gw.Config(pipeline_mode="bogus"))
 
-    @pytest.mark.parametrize("mode", ["rotate", "per_monitor"])
-    def test_empty_combos_raises(self, mode):
+    @pytest.mark.parametrize("mode", ["rotate", "per_monitor", "files"])
+    def test_empty_pipelines_raises(self, mode):
         with pytest.raises(ValueError, match="requires at least one"):
-            gw.validate_combos(gw.Config(combo_mode=mode, combos=()))
+            gw.validate_pipelines(gw.Config(pipeline_mode=mode, pipelines=()))
 
-    def test_duplicate_combo_names_raise(self):
-        cfg = gw.Config(combo_mode="rotate", combos=(gw.Combo(name="a"), gw.Combo(name="a")))
+    def test_duplicate_pipeline_names_raise(self):
+        cfg = gw.Config(pipeline_mode="rotate", pipelines=(gw.Pipeline(name="a"), gw.Pipeline(name="a")))
         with pytest.raises(ValueError, match="unique"):
-            gw.validate_combos(cfg)
+            gw.validate_pipelines(cfg)
 
-    def test_per_monitor_requires_monitor_on_every_combo(self):
+    def test_per_monitor_requires_monitor_on_every_pipeline(self):
         cfg = gw.Config(
-            combo_mode="per_monitor",
-            combos=(gw.Combo(name="a", monitor=0), gw.Combo(name="b")),
+            pipeline_mode="per_monitor",
+            pipelines=(gw.Pipeline(name="a", monitor=0), gw.Pipeline(name="b")),
         )
-        with pytest.raises(ValueError, match="requires every combo to set `monitor`"):
-            gw.validate_combos(cfg)
+        with pytest.raises(ValueError, match="requires every pipeline to set `monitor`"):
+            gw.validate_pipelines(cfg)
 
     def test_per_monitor_requires_unique_monitor_indices(self):
         cfg = gw.Config(
-            combo_mode="per_monitor",
-            combos=(gw.Combo(name="a", monitor=0), gw.Combo(name="b", monitor=0)),
+            pipeline_mode="per_monitor",
+            pipelines=(gw.Pipeline(name="a", monitor=0), gw.Pipeline(name="b", monitor=0)),
         )
         with pytest.raises(ValueError, match="unique"):
-            gw.validate_combos(cfg)
+            gw.validate_pipelines(cfg)
 
     def test_valid_per_monitor_config_passes(self):
         cfg = gw.Config(
-            combo_mode="per_monitor",
-            combos=(gw.Combo(name="a", monitor=0), gw.Combo(name="b", monitor=1)),
+            pipeline_mode="per_monitor",
+            pipelines=(gw.Pipeline(name="a", monitor=0), gw.Pipeline(name="b", monitor=1)),
         )
-        gw.validate_combos(cfg)  # no raise
+        gw.validate_pipelines(cfg)  # no raise
 
     def test_rotate_does_not_require_monitor(self):
-        cfg = gw.Config(combo_mode="rotate", combos=(gw.Combo(name="a"), gw.Combo(name="b")))
-        gw.validate_combos(cfg)  # no raise
+        cfg = gw.Config(pipeline_mode="rotate", pipelines=(gw.Pipeline(name="a"), gw.Pipeline(name="b")))
+        gw.validate_pipelines(cfg)  # no raise
+
+    def test_files_mode_requires_at_least_one_output_file(self):
+        cfg = gw.Config(pipeline_mode="files", pipelines=(gw.Pipeline(name="a"),))  # no output_file set
+        with pytest.raises(ValueError, match='requires at least one pipeline with `output_file`'):
+            gw.validate_pipelines(cfg)
+
+    def test_files_mode_ignores_pipelines_without_output_file(self):
+        cfg = gw.Config(
+            pipeline_mode="files",
+            pipelines=(gw.Pipeline(name="a", output_file="a.jpg"), gw.Pipeline(name="b")),
+        )
+        gw.validate_pipelines(cfg)  # no raise -- "b" is simply unused in this mode
+
+    def test_files_mode_requires_unique_output_file(self):
+        cfg = gw.Config(
+            pipeline_mode="files",
+            pipelines=(gw.Pipeline(name="a", output_file="same.jpg"), gw.Pipeline(name="b", output_file="same.jpg")),
+        )
+        with pytest.raises(ValueError, match="unique"):
+            gw.validate_pipelines(cfg)
+
+    def test_files_mode_distinct_output_files_pass(self):
+        cfg = gw.Config(
+            pipeline_mode="files",
+            pipelines=(gw.Pipeline(name="a", output_file="a.jpg"), gw.Pipeline(name="b", output_file="b.jpg")),
+        )
+        gw.validate_pipelines(cfg)  # no raise
+
+    @pytest.mark.parametrize("field", ["output_width", "output_height"])
+    def test_output_width_height_partial_set_raises(self, field):
+        cfg = gw.Config(pipeline_mode="rotate", pipelines=(gw.Pipeline(name="a", **{field: 100}),))
+        with pytest.raises(ValueError, match="output_width/output_height must both be set together"):
+            gw.validate_pipelines(cfg)
+
+    def test_output_width_height_both_set_passes(self):
+        cfg = gw.Config(
+            pipeline_mode="files",
+            pipelines=(gw.Pipeline(name="a", output_file="a.jpg", output_width=100, output_height=200),),
+        )
+        gw.validate_pipelines(cfg)  # no raise
+
+    def test_output_width_height_both_unset_passes(self):
+        cfg = gw.Config(pipeline_mode="rotate", pipelines=(gw.Pipeline(name="a"),))
+        gw.validate_pipelines(cfg)  # no raise
 
 
 class TestValidateSourceKind:
@@ -171,17 +215,17 @@ class TestValidateSourceKind:
         with pytest.raises(ValueError, match="source_kind must be one of"):
             gw.validate_source_kind(gw.Config(source_kind="bogus"))
 
-    def test_combo_source_kind_none_is_ignored(self):
-        cfg = gw.Config(combos=(gw.Combo(name="a"),))
+    def test_pipeline_source_kind_none_is_ignored(self):
+        cfg = gw.Config(pipelines=(gw.Pipeline(name="a"),))
         gw.validate_source_kind(cfg)  # no raise
 
-    def test_combo_source_kind_valid_passes(self):
-        cfg = gw.Config(combos=(gw.Combo(name="a", source_kind="satpy_raw"),))
+    def test_pipeline_source_kind_valid_passes(self):
+        cfg = gw.Config(pipelines=(gw.Pipeline(name="a", source_kind="satpy_raw"),))
         gw.validate_source_kind(cfg)  # no raise
 
-    def test_bogus_combo_source_kind_raises(self):
-        cfg = gw.Config(combos=(gw.Combo(name="a", source_kind="bogus"),))
-        with pytest.raises(ValueError, match=r"combos\['a'\].source_kind must be one of"):
+    def test_bogus_pipeline_source_kind_raises(self):
+        cfg = gw.Config(pipelines=(gw.Pipeline(name="a", source_kind="bogus"),))
+        with pytest.raises(ValueError, match=r"pipelines\['a'\].source_kind must be one of"):
             gw.validate_source_kind(cfg)
 
     def test_image_file_is_valid_with_image_path(self):
@@ -191,17 +235,17 @@ class TestValidateSourceKind:
         with pytest.raises(ValueError, match='source_kind = "image_file" requires image_path'):
             gw.validate_source_kind(gw.Config(source_kind="image_file"))
 
-    def test_combo_image_file_without_image_path_raises(self):
-        cfg = gw.Config(combos=(gw.Combo(name="a", source_kind="image_file"),))
-        with pytest.raises(ValueError, match=r"combos\['a'\]: source_kind = \"image_file\" requires image_path"):
+    def test_pipeline_image_file_without_image_path_raises(self):
+        cfg = gw.Config(pipelines=(gw.Pipeline(name="a", source_kind="image_file"),))
+        with pytest.raises(ValueError, match=r"pipelines\['a'\]: source_kind = \"image_file\" requires image_path"):
             gw.validate_source_kind(cfg)
 
-    def test_combo_image_file_falls_back_to_config_image_path(self):
+    def test_pipeline_image_file_falls_back_to_config_image_path(self):
         cfg = gw.Config(
             source_kind="image_file", image_path="frame.png",
-            combos=(gw.Combo(name="a", source_kind="image_file"),),
+            pipelines=(gw.Pipeline(name="a", source_kind="image_file"),),
         )
-        gw.validate_source_kind(cfg)  # no raise -- combo inherits cfg.image_path
+        gw.validate_source_kind(cfg)  # no raise -- pipeline inherits cfg.image_path
 
 
 class TestValidateLonlatCropBounds:
@@ -228,13 +272,13 @@ class TestValidateLonlatCropBounds:
         with pytest.raises(ValueError, match="min_lat"):
             gw.validate_lonlat_crop_bounds(cfg)
 
-    def test_combo_partial_set_raises(self):
-        cfg = gw.Config(combos=(gw.Combo(name="a", crop_min_lon=-100.0),))
-        with pytest.raises(ValueError, match=r"combos\['a'\].*must all be set together"):
+    def test_pipeline_partial_set_raises(self):
+        cfg = gw.Config(pipelines=(gw.Pipeline(name="a", crop_min_lon=-100.0),))
+        with pytest.raises(ValueError, match=r"pipelines\['a'\].*must all be set together"):
             gw.validate_lonlat_crop_bounds(cfg)
 
-    def test_combo_fully_set_and_valid_passes(self):
-        cfg = gw.Config(combos=(gw.Combo(name="a", crop_min_lon=-100.0, crop_min_lat=30.0, crop_max_lon=-90.0, crop_max_lat=40.0),))
+    def test_pipeline_fully_set_and_valid_passes(self):
+        cfg = gw.Config(pipelines=(gw.Pipeline(name="a", crop_min_lon=-100.0, crop_min_lat=30.0, crop_max_lon=-90.0, crop_max_lat=40.0),))
         gw.validate_lonlat_crop_bounds(cfg)  # no raise
 
 
@@ -260,16 +304,16 @@ class TestValidateOutputProjection:
         )
         gw.validate_output_projection(cfg)  # no raise
 
-    def test_platecarree_combo_without_bounds_and_no_top_level_fallback_raises(self):
-        cfg = gw.Config(output_projection="platecarree", combos=(gw.Combo(name="a"),))
-        with pytest.raises(ValueError, match=r"combos\['a'\]"):
+    def test_platecarree_pipeline_without_bounds_and_no_top_level_fallback_raises(self):
+        cfg = gw.Config(output_projection="platecarree", pipelines=(gw.Pipeline(name="a"),))
+        with pytest.raises(ValueError, match=r"pipelines\['a'\]"):
             gw.validate_output_projection(cfg)
 
-    def test_platecarree_combo_falls_back_to_top_level_bounds(self):
+    def test_platecarree_pipeline_falls_back_to_top_level_bounds(self):
         cfg = gw.Config(
             output_projection="platecarree",
             source_crop_min_lon=-110.0, source_crop_min_lat=30.0, source_crop_max_lon=-90.0, source_crop_max_lat=45.0,
-            combos=(gw.Combo(name="a"),),
+            pipelines=(gw.Pipeline(name="a"),),
         )
         gw.validate_output_projection(cfg)  # no raise
 
@@ -320,12 +364,61 @@ class TestValidateOutputProjection:
         with pytest.raises(ValueError, match="must be less than"):
             gw.validate_output_projection(cfg)
 
-    def test_platecarree_combo_own_bounds_pass_without_top_level(self):
+    def test_platecarree_pipeline_own_bounds_pass_without_top_level(self):
         cfg = gw.Config(
             output_projection="platecarree",
-            combos=(gw.Combo(name="a", crop_min_lon=-100.0, crop_min_lat=30.0, crop_max_lon=-90.0, crop_max_lat=40.0),),
+            pipelines=(gw.Pipeline(name="a", crop_min_lon=-100.0, crop_min_lat=30.0, crop_max_lon=-90.0, crop_max_lat=40.0),),
         )
         gw.validate_output_projection(cfg)  # no raise
+
+    def test_pipeline_own_projection_choice_overrides_config(self):
+        # Config stays "native" (needs no bounds); the pipeline's own
+        # "lambertconformal" is what actually gets validated, including its bounds
+        # requirement -- unlike the pre-Pipeline design, output_projection itself is
+        # now per-pipeline overridable, not just the bounds.
+        cfg = gw.Config(
+            output_projection="native",
+            pipelines=(gw.Pipeline(name="a", output_projection="lambertconformal"),),
+        )
+        with pytest.raises(ValueError, match=r"pipelines\['a'\].*requires a complete lon/lat crop box"):
+            gw.validate_output_projection(cfg)
+
+    def test_pipeline_own_projection_choice_with_own_bounds_passes(self):
+        cfg = gw.Config(
+            output_projection="native",
+            pipelines=(
+                gw.Pipeline(
+                    name="a", output_projection="lambertconformal",
+                    crop_min_lon=-125.0, crop_min_lat=25.0, crop_max_lon=-95.0, crop_max_lat=50.0,
+                ),
+            ),
+        )
+        gw.validate_output_projection(cfg)  # no raise
+
+    def test_bogus_pipeline_projection_raises(self):
+        cfg = gw.Config(pipelines=(gw.Pipeline(name="a", output_projection="bogus"),))
+        with pytest.raises(ValueError, match=r"pipelines\['a'\].*output_projection must be one of"):
+            gw.validate_output_projection(cfg)
+
+    def test_pipeline_falls_back_to_config_projection_when_unset(self):
+        # Config's own "platecarree" needs bounds; a pipeline that doesn't override
+        # output_projection inherits both the projection and its bounds requirement.
+        cfg = gw.Config(output_projection="platecarree", pipelines=(gw.Pipeline(name="a"),))
+        with pytest.raises(ValueError, match=r"pipelines\['a'\]"):
+            gw.validate_output_projection(cfg)
+
+    def test_pipeline_partial_lcc_standard_parallels_raises(self):
+        cfg = gw.Config(
+            pipelines=(
+                gw.Pipeline(
+                    name="a", output_projection="lambertconformal",
+                    crop_min_lon=-125.0, crop_min_lat=25.0, crop_max_lon=-95.0, crop_max_lat=50.0,
+                    output_projection_lcc_lat1=30.0,
+                ),
+            ),
+        )
+        with pytest.raises(ValueError, match=r"pipelines\['a'\].*must both be set together"):
+            gw.validate_output_projection(cfg)
 
 
 class TestValidatePlatform:
@@ -375,16 +468,29 @@ class TestValidateLockScreen:
                 gw.Config(set_lock_screen=True), _FakeLockScreenPlatform(False)
             )
 
-    def test_enabled_with_per_monitor_combo_mode_raises(self):
-        with pytest.raises(ValueError, match='combo_mode = "per_monitor"'):
+    def test_enabled_with_per_monitor_pipeline_mode_raises(self):
+        with pytest.raises(ValueError, match='pipeline_mode = "per_monitor"'):
             gw.validate_lock_screen(
-                gw.Config(set_lock_screen=True, combo_mode="per_monitor"),
+                gw.Config(set_lock_screen=True, pipeline_mode="per_monitor"),
                 _FakeLockScreenPlatform(True),
             )
 
-    def test_disabled_with_per_monitor_combo_mode_is_valid(self):
+    def test_disabled_with_per_monitor_pipeline_mode_is_valid(self):
         gw.validate_lock_screen(
-            gw.Config(set_lock_screen=False, combo_mode="per_monitor"),
+            gw.Config(set_lock_screen=False, pipeline_mode="per_monitor"),
+            _FakeLockScreenPlatform(True),
+        )  # no raise
+
+    def test_enabled_with_files_pipeline_mode_raises(self):
+        with pytest.raises(ValueError, match='pipeline_mode = "files"'):
+            gw.validate_lock_screen(
+                gw.Config(set_lock_screen=True, pipeline_mode="files"),
+                _FakeLockScreenPlatform(True),
+            )
+
+    def test_disabled_with_files_pipeline_mode_is_valid(self):
+        gw.validate_lock_screen(
+            gw.Config(set_lock_screen=False, pipeline_mode="files"),
             _FakeLockScreenPlatform(True),
         )  # no raise
 

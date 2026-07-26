@@ -72,7 +72,7 @@ _REQUIRED_BANDS = {1, 2, 3, 13}
 # factor) instead of a fixed constant, the same way cdn_jpg's `resolution` tier
 # selection could in principle be screen-aware -- would need threading screen_size
 # (currently only known in goes_wallpaper.py's fetch_and_render) down into
-# fetch_composite, and deciding how much headroom to keep for source_crop_*/combo
+# fetch_composite, and deciding how much headroom to keep for source_crop_*/pipeline
 # crop_* users who intentionally crop into a sub-region before the screen-fit crop.
 _COMPOSITE_TARGET_WIDTH_PX = 5000
 

@@ -7,14 +7,17 @@
 identified from log.txt alone, without needing to know which directory it was
 launched from -- see setup_logging's call site for the log line itself."""
 
+import logging
 import re
+
+import pytest
 
 import goes_wallpaper as gw
 
 
 class TestPackageVersion:
     def test_reads_the_checkout_s_pyproject_toml(self):
-        assert gw._package_version() == "2.3.0"
+        assert gw._package_version() == "2.4.0"
 
     def test_falls_back_to_installed_metadata_when_pyproject_unparseable(self, monkeypatch):
         def boom(f):
@@ -65,3 +68,42 @@ class TestCommitHash:
 
         monkeypatch.setattr(gw.subprocess, "run", boom)
         assert gw._commit_hash() is None
+
+
+@pytest.fixture
+def _restore_root_logger():
+    """setup_logging() replaces the root logger's handlers wholesale -- restore
+    whatever was there before so this doesn't leak into other tests' logging."""
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    original_level = root.level
+    yield
+    for handler in root.handlers:
+        handler.close()
+    root.handlers = original_handlers
+    root.setLevel(original_level)
+
+
+class TestSetupLogging:
+    def test_log_to_stdout_false_only_adds_the_file_handler(self, tmp_path, _restore_root_logger):
+        cfg = gw.Config(data_dir=tmp_path, log_to_stdout=False)
+        gw.setup_logging(cfg)
+        root = logging.getLogger()
+        assert len(root.handlers) == 1
+        assert isinstance(root.handlers[0], gw.RotatingFileHandler)
+
+    def test_log_to_stdout_true_also_adds_a_stream_handler(self, tmp_path, _restore_root_logger):
+        cfg = gw.Config(data_dir=tmp_path, log_to_stdout=True)
+        gw.setup_logging(cfg)
+        root = logging.getLogger()
+        assert len(root.handlers) == 2
+        assert any(
+            isinstance(h, logging.StreamHandler) and not isinstance(h, gw.RotatingFileHandler)
+            for h in root.handlers
+        )
+
+    def test_log_to_stdout_true_actually_prints_to_stdout(self, tmp_path, capsys, _restore_root_logger):
+        cfg = gw.Config(data_dir=tmp_path, log_to_stdout=True)
+        gw.setup_logging(cfg)
+        logging.info("distinctive marker message xyz123")
+        assert "distinctive marker message xyz123" in capsys.readouterr().out
