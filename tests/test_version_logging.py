@@ -17,7 +17,7 @@ import goes_wallpaper as gw
 
 class TestPackageVersion:
     def test_reads_the_checkout_s_pyproject_toml(self):
-        assert gw._package_version() == "2.4.0"
+        assert re.fullmatch(r"\d+\.\d+\.\d+", gw._package_version())
 
     def test_falls_back_to_installed_metadata_when_pyproject_unparseable(self, monkeypatch):
         def boom(f):

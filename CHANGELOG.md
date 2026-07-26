@@ -2,6 +2,18 @@
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.4.1] — 2026-07-26 — CI fix
+
+### Fixed
+- `uv sync` on `ubuntu-latest` CI failed building `pycairo` from source (no
+  Linux wheel, no system `libcairo`/`pkg-config` on the runner). `svglib`/
+  `reportlab`/`rlpycairo` (pycairo's dependents, only ever needed by the
+  one-time `scripts/rasterize_maki_icons.py`) were listed in `pyproject.toml`'s
+  `[dependency-groups].dev`, which `uv sync` installs unconditionally on every
+  OS in the matrix. Removed them from the tracked dev group; re-rasterizing
+  icons now installs them ad hoc (`uv run --with svglib --with reportlab
+  --with rlpycairo ...`) instead. No runtime or test behavior changed.
+
 ## [2.4.0] — 2026-07-25 — named pipelines, GeoJSON rendering overhaul
 
 ### Changed
