@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 # scripts/rasterize_maki_icons.py -- one-time (re-run-as-needed) conversion of the
 # vendored Maki SVG icon set (vendor/maki/icons/) into the PNGs goes_wallpaper.py
-# actually reads at runtime (overlays/icons/). Not wired into the main CLI or
-# runtime dependencies -- svglib/reportlab/rlPyCairo (this script's own deps) live
-# in pyproject.toml's [dependency-groups] dev list, not the app's `dependencies`,
-# since nothing at runtime ever needs to render SVG.
+# actually reads at runtime (overlays/icons/). Not wired into the main CLI,
+# runtime dependencies, or the project's tracked dependency groups -- this
+# script's own deps (svglib, reportlab, rlPyCairo) pull in pycairo, which has no
+# Linux wheel and fails to build on a bare ubuntu-latest CI runner (no system
+# libcairo/pkg-config). Since nothing at runtime ever needs to render SVG, and
+# this script is only ever run ad hoc on a dev machine when re-vendoring icons,
+# install its deps by hand in a scratch venv instead of via `uv sync`:
+#     uv run --with svglib --with reportlab --with rlpycairo python scripts/rasterize_maki_icons.py
 #
 # Copyright (C) 2026 John-Schreiber
 # SPDX-License-Identifier: GPL-3.0-or-later
@@ -15,7 +19,7 @@ See vendor/maki/README.md for provenance/license (CC0-1.0) and re-vendoring
 instructions.
 
 Usage:
-    uv run python scripts/rasterize_maki_icons.py
+    uv run --with svglib --with reportlab --with rlpycairo python scripts/rasterize_maki_icons.py
 """
 from __future__ import annotations
 
