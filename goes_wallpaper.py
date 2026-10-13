@@ -73,6 +73,10 @@ from platform_base import MonitorInfo, WallpaperPlatform, WALLPAPER_STYLE_NAMES,
 # misbehaving CDN serving an oversized image.
 Image.MAX_IMAGE_PIXELS = 130_000_000
 
+# Child processes (git, overlay shell_sources) would otherwise each flash a console
+# window and steal focus when run under pythonw.exe (e.g. from Task Scheduler).
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
@@ -957,6 +961,7 @@ def _commit_hash() -> str | None:
             text=True,
             timeout=5,
             check=False,
+            creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -1623,7 +1628,9 @@ def fetch_shell_geojson(command: tuple[str, ...], timeout: float) -> dict[str, A
     if not command:
         return None
     try:
-        proc = subprocess.Popen(list(command), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(
+            list(command), stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=_NO_WINDOW,
+        )
     except OSError as e:
         logging.warning("overlay_shell_command %s failed to run: %s", command, e)
         return None
