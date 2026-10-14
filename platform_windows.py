@@ -180,6 +180,7 @@ def _query_wmi_resolution() -> tuple[int, int] | None:
             capture_output=True,
             text=True,
             timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         if proc.returncode != 0 or not proc.stdout.strip():
             return None
